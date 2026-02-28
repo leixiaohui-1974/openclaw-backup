@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "skills": {
+    "gitclaw": {
+      "version": "1.0.0",
+      "installedAt": 1772237538137
+    },
+    "agent-browser": {
+      "version": "0.2.0",
+      "installedAt": 1772237584809
+    },
+    "nano-pdf": {
+      "version": "1.0.0",
+      "installedAt": 1772237613754
+    }
+  }
+}
