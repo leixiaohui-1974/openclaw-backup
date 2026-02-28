@@ -710,7 +710,6 @@ def _feishu_write_blocks(token, doc_token, blocks):
                         written += 1
             else:
                 written += len(created)
-            _time.sleep(0.1)
         batch.clear()
 
     for item in blocks:
@@ -734,7 +733,6 @@ def _feishu_write_blocks(token, doc_token, blocks):
                     }})
                 c, e = _feishu_create_blocks(token, doc_token, doc_token, fallback)
                 written += len(fallback) if not e else 0
-            _time.sleep(0.1)
         else:
             batch.append(item)
 
@@ -754,7 +752,6 @@ def _publish_to_feishu(title, md_text, chart_path=None, folder_token=None):
 
     # Insert chart image
     if chart_path and os.path.exists(chart_path):
-        _time.sleep(0.2)
         r = s.get(
             f"{FEISHU_BASE}/docx/v1/documents/{doc_token}/blocks/{doc_token}/children",
             headers=_feishu_headers(token), params={"page_size": 50})
@@ -912,7 +909,6 @@ def _publish_report_to_feishu(title, md_text, images, folder_token=None):
         if not os.path.exists(img_path):
             continue
 
-        _time.sleep(0.2)
         r = s.get(
             f"{FEISHU_BASE}/docx/v1/documents/{doc_token}/blocks/{doc_token}/children",
             headers=_feishu_headers(token), params={"page_size": 100})
@@ -956,8 +952,341 @@ def _publish_report_to_feishu(title, md_text, images, folder_token=None):
     return doc_url, doc_token, written
 
 
+def _parse_sim_params(text: str) -> dict:
+    """Extract simulation parameters from natural language text.
+
+    Supports Chinese and English patterns like:
+      初始水位1.0米, 时长600秒, 面积2平方米, 入流0.02m³/s,
+      出口面积0.005, 流量系数0.65, duration 600, initial_h 1.0, etc.
+    Returns a dict with keys matching TankAnalysisRequest fields.
+    """
+    params: dict = {}
+
+    # --- initial water level ---
+    m = re.search(r'初始水位\s*([\d.]+)\s*(?:米|m)', text)
+    if not m:
+        m = re.search(r'initial[_\s]?h(?:eight)?\s*[=:]\s*([\d.]+)', text, re.I)
+    if not m:
+        m = re.search(r'水位\s*([\d.]+)\s*(?:米|m)', text)
+    if m:
+        params["initial_h"] = float(m.group(1))
+
+    # --- duration ---
+    m = re.search(r'时长\s*([\d.]+)\s*(?:秒|s)', text)
+    if not m:
+        m = re.search(r'(?:仿真|模拟)?\s*([\d.]+)\s*(?:秒|s)\b', text)
+    if not m:
+        m = re.search(r'duration\s*[=:]\s*([\d.]+)', text, re.I)
+    if m:
+        params["duration"] = float(m.group(1))
+
+    # --- tank area ---
+    m = re.search(r'(?:水箱)?面积\s*([\d.]+)\s*(?:平方米|m²|m2|㎡)', text)
+    if not m:
+        m = re.search(r'(?:tank[_\s]?)?area\s*[=:]\s*([\d.]+)', text, re.I)
+    if m:
+        params.setdefault("tank_params", {})["area"] = float(m.group(1))
+
+    # --- outlet area ---
+    m = re.search(r'出口面积\s*([\d.]+)\s*(?:平方米|m²|m2|㎡)?', text)
+    if not m:
+        m = re.search(r'outlet[_\s]?area\s*[=:]\s*([\d.]+)', text, re.I)
+    if m:
+        params.setdefault("tank_params", {})["outlet_area"] = float(m.group(1))
+
+    # --- discharge coefficient ---
+    m = re.search(r'(?:流量系数|Cd)\s*[=:]\s*([\d.]+)', text, re.I)
+    if m:
+        params.setdefault("tank_params", {})["cd"] = float(m.group(1))
+
+    # --- inflow ---
+    m = re.search(r'入流\s*([\d.]+)\s*(?:m³/s)?', text)
+    if not m:
+        m = re.search(r'q[_\s]?in\s*[=:]\s*([\d.]+)', text, re.I)
+    if m:
+        params["q_in_profile"] = [[0, float(m.group(1))]]
+
+    # --- dt ---
+    m = re.search(r'(?:步长|dt)\s*[=:]\s*([\d.]+)', text, re.I)
+    if m:
+        params["dt"] = float(m.group(1))
+
+    return params
+
+
+# ══════════════════════════════════════════════════════════════
+# Generic skill routing + adaptive report architecture
+# ══════════════════════════════════════════════════════════════
+
+_skills_cache: dict = {"skills": None, "expires": 0}
+
+# Keywords that indicate tank simulation (uses the rich /api/report/tank-analysis endpoint)
+_SIM_KEYWORDS = {"仿真", "模拟", "水箱", "水位变化", "阶跃响应", "水动力"}
+
+
+def _find_matching_skill(message: str) -> str | None:
+    """Dynamically match message to a HydroMAS skill via trigger phrases.
+
+    Queries /api/gateway/skills to get available skills and their trigger phrases,
+    then scores each skill by how many trigger phrases appear in the message.
+    Returns the best-matching skill name, or None if no match.
+    """
+    now = _time.time()
+    if _skills_cache["skills"] is None or now > _skills_cache["expires"]:
+        result = _get("/api/gateway/skills")
+        _skills_cache["skills"] = result.get("skills", [])
+        _skills_cache["expires"] = now + 300  # 5 min cache
+
+    skills = _skills_cache["skills"]
+    msg_lower = message.lower()
+    best_match = None
+    best_score = 0
+
+    for skill in skills:
+        triggers = skill.get("trigger_phrases", [])
+        score = sum(1 for t in triggers if t.lower() in msg_lower)
+        if score > best_score:
+            best_score = score
+            best_match = skill.get("name")
+
+    return best_match if best_score > 0 else None
+
+
+def _is_simulation_request(message: str) -> bool:
+    """Check if the message is specifically a tank simulation request.
+
+    Tank simulation uses the rich /api/report/tank-analysis endpoint which
+    produces structured data with simulation arrays, ODD checks, and insights.
+    """
+    msg_lower = message.lower()
+    return any(kw in msg_lower for kw in _SIM_KEYWORDS)
+
+
+def _humanize_key(key: str) -> str:
+    """Convert snake_case keys to human-readable Chinese labels."""
+    KEY_MAP = {
+        "initial_h": "初始水位 (m)", "final_h": "最终水位 (m)",
+        "h_change": "水位变化 (m)", "h_max_sim": "最高水位 (m)",
+        "h_min_sim": "最低水位 (m)", "volume_change_m3": "体积变化 (m³)",
+        "duration": "时长 (s)", "dt": "时间步长 (s)",
+        "controller_type": "控制器类型", "setpoint": "设定值",
+        "performance_metrics": "性能指标", "rmse": "RMSE",
+        "mae": "MAE", "settling_time": "调节时间 (s)",
+        "overshoot": "超调量 (%)", "rise_time": "上升时间 (s)",
+        "forecast": "预报结果", "warning": "预警信息",
+        "warning_level": "预警等级", "rehearsal": "预演方案",
+        "plan": "应急预案", "summary": "摘要",
+        "open_loop_simulation": "开环仿真", "identification": "系统辨识",
+        "control_simulation": "闭环仿真", "success": "执行状态",
+        "steps_completed": "完成步骤", "execution_time": "执行时间 (s)",
+        "q_in_total_m3": "总入流 (m³)", "q_out_total_m3": "总出流 (m³)",
+        "mass_balance_error_m3": "质量守恒误差 (m³)",
+        "response_type": "响应类型", "is_steady_state": "是否达稳态",
+        "h_steady_state_theory": "理论稳态水位 (m)",
+        "time_constant_s": "时间常数 (s)",
+        "risk_threshold": "风险阈值", "risk_score": "风险得分",
+        "status": "状态", "level": "等级", "message": "信息",
+        "reuse_rate": "回用率", "water_saving": "节水量",
+        "leak_location": "泄漏位置", "leak_probability": "泄漏概率",
+        "evaporation_loss": "蒸发损失", "total_loss": "总损失",
+    }
+    if key in KEY_MAP:
+        return KEY_MAP[key]
+    return key.replace("_", " ").replace("-", " ").title()
+
+
+def _format_value(v) -> str:
+    """Format a value for display in a table cell."""
+    if v is None:
+        return "-"
+    if isinstance(v, bool):
+        return "是" if v else "否"
+    if isinstance(v, float):
+        if abs(v) < 0.001 and v != 0:
+            return f"{v:.6f}"
+        return f"{v:.4f}"
+    return str(v)
+
+
+def _render_dict_to_md(d: dict, lines: list, level: int = 2):
+    """Recursively render a dict as Markdown sections and tables.
+
+    - Flat dicts (all scalar values) → table
+    - Nested dicts → sub-sections
+    - Lists of dicts → table rows
+    - Lists of scalars → bullet list or summary
+    - Time-series arrays (time, water_level, etc.) → skipped (handled by chart generator)
+    """
+    TIMESERIES_KEYS = {"time", "water_level", "outflow", "inflow", "response", "t"}
+    heading = "#" * min(level, 5)
+
+    # Separate scalar vs complex items
+    scalars = {}
+    complex_items = {}
+    for k, v in d.items():
+        if k in TIMESERIES_KEYS and isinstance(v, list) and len(v) > 10:
+            continue  # skip raw time series
+        if isinstance(v, (str, int, float, bool, type(None))):
+            scalars[k] = v
+        else:
+            complex_items[k] = v
+
+    # Render scalars as a table if there are multiple
+    if len(scalars) >= 2:
+        lines.append("| 指标 | 值 |")
+        lines.append("|------|------|")
+        for k, v in scalars.items():
+            lines.append(f"| {_humanize_key(k)} | {_format_value(v)} |")
+        lines.append("")
+    elif len(scalars) == 1:
+        k, v = next(iter(scalars.items()))
+        lines.append(f"- **{_humanize_key(k)}**: {_format_value(v)}")
+        lines.append("")
+
+    # Render complex items
+    for k, v in complex_items.items():
+        if isinstance(v, dict):
+            lines.append(f"{heading} {_humanize_key(k)}")
+            lines.append("")
+            _render_dict_to_md(v, lines, level + 1)
+        elif isinstance(v, list):
+            if not v:
+                continue
+            if all(isinstance(x, (int, float)) for x in v):
+                if len(v) > 10:
+                    lines.append(f"- **{_humanize_key(k)}**: {len(v)} 个数据点 [{v[0]:.4f} ... {v[-1]:.4f}]")
+                else:
+                    lines.append(f"- **{_humanize_key(k)}**: {', '.join(_format_value(x) for x in v)}")
+            elif all(isinstance(x, dict) for x in v):
+                lines.append(f"{heading} {_humanize_key(k)}")
+                lines.append("")
+                keys = list(v[0].keys())
+                lines.append("| " + " | ".join(_humanize_key(kk) for kk in keys) + " |")
+                lines.append("|" + "------|" * len(keys))
+                for row in v[:20]:  # limit to 20 rows
+                    lines.append("| " + " | ".join(_format_value(row.get(kk, "")) for kk in keys) + " |")
+                if len(v) > 20:
+                    lines.append(f"| ... | 共 {len(v)} 行 |")
+                lines.append("")
+            elif all(isinstance(x, str) for x in v):
+                for x in v:
+                    lines.append(f"- {x}")
+                lines.append("")
+            else:
+                lines.append(f"- **{_humanize_key(k)}**: {json.dumps(v, ensure_ascii=False)[:200]}")
+                lines.append("")
+
+
+def _build_adaptive_report(message: str, result: dict, skill_name: str | None = None) -> str:
+    """Build a Markdown report that adapts to any response structure.
+
+    Works with any skill/chat response — no hardcoded section templates needed.
+    """
+    from datetime import datetime
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    lines = [
+        f"# HydroMAS 分析报告",
+        "",
+        f"> **问题**: {message}",
+        f"> **时间**: {now_str}",
+    ]
+    if skill_name:
+        lines.append(f"> **分析类型**: {_humanize_key(skill_name)}")
+    lines += ["", "---", ""]
+
+    # Extract main data — handle various response wrappers
+    data = result
+    if isinstance(data, dict):
+        # Skill endpoint: {success, data, steps_completed, execution_time}
+        if "data" in data and isinstance(data["data"], dict):
+            meta_lines = []
+            if "steps_completed" in data:
+                meta_lines.append(f"完成步骤: {data['steps_completed']}")
+            if "execution_time" in data:
+                meta_lines.append(f"耗时: {data['execution_time']:.1f}s")
+            if meta_lines:
+                lines.append(f"*{' | '.join(meta_lines)}*")
+                lines.append("")
+            data = data["data"]
+        # Gateway/chat: {response: "text", ...}
+        elif "response" in data and isinstance(data["response"], str):
+            lines.append(data["response"])
+            lines += ["", "---", "", "*报告由 HydroMAS 平台自动生成*"]
+            return "\n".join(lines)
+        # Gateway/skill: {result: {...}}
+        elif "result" in data and isinstance(data["result"], dict):
+            inner = data["result"]
+            if "data" in inner:
+                data = inner["data"]
+            else:
+                data = inner
+
+    if isinstance(data, dict):
+        _render_dict_to_md(data, lines, level=2)
+    elif isinstance(data, str):
+        lines.append(data)
+    elif isinstance(data, list):
+        for item in data:
+            if isinstance(item, dict):
+                _render_dict_to_md(item, lines, level=2)
+                lines.append("")
+            else:
+                lines.append(f"- {item}")
+
+    lines += ["", "---", "", "*报告由 HydroMAS 五层架构平台自动生成*"]
+    return "\n".join(lines)
+
+
+def _auto_detect_charts(result: dict) -> list[str]:
+    """Scan result for time-series data and generate charts automatically.
+
+    Looks for dicts containing both 'time' and 'water_level' arrays.
+    Returns list of chart file paths.
+    """
+    charts = []
+
+    def _scan(d: dict, label: str = "HydroMAS"):
+        if not isinstance(d, dict):
+            return
+        if "time" in d and "water_level" in d:
+            if isinstance(d["time"], list) and isinstance(d["water_level"], list):
+                path = _generate_chart_from_sim(d, label)
+                if path:
+                    charts.append(path)
+                return  # don't recurse into this dict further
+        for k, v in d.items():
+            if isinstance(v, dict):
+                _scan(v, _humanize_key(k))
+
+    # Check common response wrappers
+    data = result
+    if isinstance(data, dict):
+        if "data" in data and isinstance(data["data"], dict):
+            data = data["data"]
+        elif "result" in data and isinstance(data["result"], dict):
+            data = data["result"]
+            if "data" in data and isinstance(data["data"], dict):
+                data = data["data"]
+        elif "simulation" in data and isinstance(data["simulation"], dict):
+            data = data["simulation"]
+
+    _scan(data)
+    return charts
+
+
 def cmd_report(args: list[str]):
-    """Run comprehensive HydroMAS analysis + publish rich Feishu document."""
+    """Run HydroMAS analysis + publish Feishu document.
+
+    Architecture:
+      1. If tank simulation keywords → use rich /api/report/tank-analysis endpoint
+      2. Else dynamically match skills from /api/gateway/skills trigger phrases
+         → call matched skill via /api/gateway/skill
+      3. Else fallback to /api/gateway/chat (orchestrator auto-routes)
+      4. Build adaptive markdown from whatever response structure comes back
+      5. Auto-detect time-series data for chart generation
+      6. Publish to Feishu doc
+    """
     if not args:
         print("Usage: hydromas_call.py report \"自然语言问题\" [--role ...] [--folder TOKEN]")
         sys.exit(1)
@@ -971,74 +1300,119 @@ def cmd_report(args: list[str]):
         else:
             i += 1
 
-    # Step 1: Call comprehensive analysis API
-    result = _post("/api/report/tank-analysis", {
-        "title": message,
-    })
-    if "error" in result:
-        # Fallback to chat
-        result = _post("/api/gateway/chat", {
-            "message": message, "role": "researcher", "session_id": "", "params": {},
-        })
-        if "error" in result:
-            print(f"Error: {result['error']}")
-            sys.exit(1)
-        # Simple fallback output
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        return
-
-    # Step 2+3: Generate charts in parallel
-    params = result.get("parameters", {})
-    sim = result.get("simulation", {})
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        f_schem = pool.submit(_generate_tank_schematic, params)
-        f_chart = pool.submit(_generate_chart_from_sim, sim, message)
-        schematic_path = f_schem.result()
-        chart_path = f_chart.result()
-
-    # Step 4: Build comprehensive markdown
-    md_text = _build_analysis_markdown(result)
-
-    # Step 5: Publish to Feishu
     from datetime import datetime
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    skill_name = None
+
+    # ── Route 1: Tank simulation (uses dedicated rich endpoint) ──
+    if _is_simulation_request(message):
+        parsed = _parse_sim_params(message)
+        api_payload: dict = {"title": message}
+        if "initial_h" in parsed:
+            api_payload["initial_h"] = parsed["initial_h"]
+        if "duration" in parsed:
+            api_payload["duration"] = parsed["duration"]
+        if "dt" in parsed:
+            api_payload["dt"] = parsed["dt"]
+        if "tank_params" in parsed:
+            api_payload["tank_params"] = parsed["tank_params"]
+        if "q_in_profile" in parsed:
+            api_payload["q_in_profile"] = parsed["q_in_profile"]
+
+        result = _post("/api/report/tank-analysis", api_payload)
+        if "error" not in result:
+            # Tank sim: use existing rich report format
+            md_text = _build_analysis_markdown(result)
+            params = result.get("parameters", {})
+            sim = result.get("simulation", {})
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                f_schem = pool.submit(_generate_tank_schematic, params)
+                f_chart = pool.submit(_generate_chart_from_sim, sim, message)
+                schematic_path = f_schem.result()
+                chart_path = f_chart.result()
+
+            title = f"HydroMAS — {message} ({now})"
+            images = [
+                {"path": schematic_path, "after_section": "系统概念图"},
+                {"path": chart_path, "after_section": "过程线图"},
+            ]
+            try:
+                doc_url, _, written = _publish_report_to_feishu(
+                    title, md_text, images, folder_token)
+                analysis = result.get("analysis", {})
+                print(f"飞书文档: {doc_url}")
+                print(f"摘要: 水位 {analysis.get('initial_h', 0):.2f}m→{analysis.get('final_h', 0):.2f}m "
+                      f"(Δ{analysis.get('h_change', 0):+.2f}m)，{analysis.get('response_type', '')}")
+            except Exception as e:
+                print(f"飞书文档创建失败: {e}")
+                print(f"\n{md_text}")
+                sys.exit(1)
+            return
+
+    # ── Route 2: Dynamic skill matching ──
+    skill_name = _find_matching_skill(message)
+    if skill_name:
+        result = _post("/api/gateway/skill", {
+            "skill_name": skill_name,
+            "params": {},
+        })
+        if "error" in result:
+            skill_name = None  # fall through to chat
+
+    # ── Route 3: Fallback to gateway/chat ──
+    if not skill_name:
+        msg_lower = message.lower()
+        role = "operator"
+        if any(k in msg_lower for k in ["仿真", "模拟", "分析", "数据", "wnal"]):
+            role = "researcher"
+        elif any(k in msg_lower for k in ["控制", "优化", "设计", "pid", "mpc"]):
+            role = "designer"
+        result = _post("/api/gateway/chat", {
+            "message": message, "role": role, "session_id": "", "params": {},
+        })
+
+    if "error" in result:
+        print(f"Error: {result['error']}")
+        sys.exit(1)
+
+    # ── Build adaptive report ──
+    md_text = _build_adaptive_report(message, result, skill_name)
+
+    # ── Auto-detect and generate charts ──
+    chart_paths = _auto_detect_charts(result)
+    images = [{"path": p, "after_section": ""} for p in chart_paths if p]
+
     title = f"HydroMAS — {message} ({now})"
 
-    images = [
-        {"path": schematic_path, "after_section": "系统概念图"},
-        {"path": chart_path, "after_section": "过程线图"},
-    ]
-
-    debug = os.environ.get("HYDROMAS_DEBUG", "").lower() in ("1", "true", "yes")
-
     try:
-        doc_url, doc_token_val, written = _publish_report_to_feishu(
-            title, md_text, images, folder_token)
+        if images:
+            doc_url, _, written = _publish_report_to_feishu(
+                title, md_text, images, folder_token)
+        else:
+            doc_url, _, written = _publish_to_feishu(
+                title, md_text, chart_path=None, folder_token=folder_token)
 
-        # Concise output for agent → user
-        analysis = result.get("analysis", {})
-        h_init = analysis.get("initial_h", 0)
-        h_final = analysis.get("final_h", 0)
-        h_change = analysis.get("h_change", 0)
+        # Build concise summary from result
+        summary_parts = []
+        data = result.get("data", result.get("result", {}))
+        if isinstance(data, dict):
+            if "summary" in data:
+                summary_parts.append(str(data["summary"])[:100])
+            elif "warning_level" in data:
+                summary_parts.append(f"预警等级: {data['warning_level']}")
+            elif "controller_type" in data:
+                summary_parts.append(f"控制器: {data['controller_type']}")
+        if isinstance(result.get("response"), str):
+            summary_parts.append(result["response"][:100])
+        if skill_name:
+            summary_parts.insert(0, f"[{_humanize_key(skill_name)}]")
+
         print(f"飞书文档: {doc_url}")
-        print(f"摘要: 水位 {h_init:.2f}m→{h_final:.2f}m (Δ{h_change:+.2f}m)，{analysis.get('response_type', '')}")
-
-        if debug:
-            print(f"\n[DEBUG] 标题: {title}")
-            print(f"[DEBUG] 内容块: {written}, 概念图: {schematic_path}, 过程线: {chart_path}")
-            odd = result.get("odd_check", {})
-            print(f"[DEBUG] ODD状态: {odd.get('status', '?')}")
-            if result.get("insights"):
-                for ins in result["insights"][:3]:
-                    print(f"[DEBUG] 发现: {ins}")
-            if result.get("recommendations"):
-                for rec in result["recommendations"]:
-                    print(f"[DEBUG] 建议: {rec}")
+        print(f"摘要: {' | '.join(summary_parts) if summary_parts else '分析完成'}")
 
     except Exception as e:
         print(f"飞书文档创建失败: {e}")
-        print(f"\n以下是分析结果（文本）:\n")
-        print(md_text)
+        print(f"\n{md_text}")
         sys.exit(1)
 
 
