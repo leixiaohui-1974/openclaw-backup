@@ -3,14 +3,16 @@
 
 用法:
     python3 hydromas_call.py chat "自然语言问题" [--role operator|researcher|designer]
-    python3 hydromas_call.py report "自然语言问题" [--role ...] [--folder TOKEN]
+    python3 hydromas_call.py report "自然语言问题" [--role ...] [--folder TOKEN] [--user-openid ID]
     python3 hydromas_call.py skill <技能名> ['{"param":"value"}']
     python3 hydromas_call.py sim [duration] [--initial_h 0.5] [--title "..."]
     python3 hydromas_call.py skills [--role operator]
     python3 hydromas_call.py health
     python3 hydromas_call.py roles
+    python3 hydromas_call.py history [--user-openid ID] [--limit N]
 
 report 命令 = chat + 自动生成飞书文档（含表格+图表），返回文档链接。
+--user-openid: 指定请求用户的飞书 open_id，文档将授权给该用户 + 管理员。
 """
 
 from __future__ import annotations
@@ -30,12 +32,13 @@ import requests as _req
 BASE_URL = "http://localhost:8000"
 TIMEOUT = 180  # bumped from 120 for large sims
 CHART_DIR = "/tmp/hydromas-charts"
+HYDROMAS_API_KEY = os.environ.get("HYDROMAS_API_KEY", "")
 
 # ── Feishu config ──
 FEISHU_BASE = "https://open.feishu.cn/open-apis"
 FEISHU_APP_ID = "cli_a915cc56d5f89cb1"
 FEISHU_APP_SECRET = "t4fBWSGN56TEzZrNXvvYTbYWOMlZFjxR"
-FEISHU_USER_OPENID = "ou_607e1555930b5636c8b88b176b9d3bf2"
+DEFAULT_USER_OPENID = "ou_607e1555930b5636c8b88b176b9d3bf2"  # admin/default
 FEISHU_DOC_DOMAIN = "leixiaohui1974.feishu.cn"
 
 # Feishu block types
@@ -58,11 +61,19 @@ def _get_feishu_session() -> _req.Session:
     return _feishu_session
 
 
+def _api_headers() -> dict:
+    """Build common headers for HydroMAS API calls."""
+    h = {"Content-Type": "application/json"}
+    if HYDROMAS_API_KEY:
+        h["X-API-Key"] = HYDROMAS_API_KEY
+    return h
+
+
 def _post(path: str, data: dict) -> dict:
     url = f"{BASE_URL}{path}"
     body = json.dumps(data).encode("utf-8")
     req = urllib.request.Request(
-        url, data=body, headers={"Content-Type": "application/json"}, method="POST"
+        url, data=body, headers=_api_headers(), method="POST"
     )
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
@@ -79,7 +90,7 @@ def _post_binary(path: str, data: dict) -> bytes | dict:
     url = f"{BASE_URL}{path}"
     body = json.dumps(data).encode("utf-8")
     req = urllib.request.Request(
-        url, data=body, headers={"Content-Type": "application/json"}, method="POST"
+        url, data=body, headers=_api_headers(), method="POST"
     )
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
@@ -96,8 +107,11 @@ def _post_binary(path: str, data: dict) -> bytes | dict:
 
 def _get(path: str) -> dict:
     url = f"{BASE_URL}{path}"
+    req = urllib.request.Request(url, method="GET")
+    if HYDROMAS_API_KEY:
+        req.add_header("X-API-Key", HYDROMAS_API_KEY)
     try:
-        with urllib.request.urlopen(url, timeout=TIMEOUT) as resp:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         err_body = e.read().decode("utf-8", errors="replace")
@@ -575,6 +589,17 @@ def _feishu_grant(token, doc_token, openid, perm="full_access"):
     return r.json().get("code") == 0
 
 
+def _grant_multi_users(token, doc_token, user_openids=None):
+    """Grant document access to admin + any extra requesting users."""
+    # Always grant to admin
+    _feishu_grant(token, doc_token, DEFAULT_USER_OPENID)
+    # Grant to extra users (skip duplicates)
+    if user_openids:
+        for oid in user_openids:
+            if oid and oid != DEFAULT_USER_OPENID:
+                _feishu_grant(token, doc_token, oid)
+
+
 def _text_elements(text):
     """Parse inline Markdown (bold, links) into Feishu text elements."""
     elements = []
@@ -740,8 +765,13 @@ def _feishu_write_blocks(token, doc_token, blocks):
     return written
 
 
-def _publish_to_feishu(title, md_text, chart_path=None, folder_token=None):
-    """Create a Feishu doc, write content, insert chart, grant access. Returns doc URL."""
+def _publish_to_feishu(title, md_text, chart_path=None, folder_token=None,
+                       user_openids=None):
+    """Create a Feishu doc, write content, insert chart, grant access. Returns doc URL.
+
+    Args:
+        user_openids: list of extra user open_ids to grant access (admin always included).
+    """
     token = _feishu_token()
     s = _get_feishu_session()
 
@@ -770,8 +800,8 @@ def _publish_to_feishu(title, md_text, chart_path=None, folder_token=None):
                 file_token = _feishu_upload_image(token, img_block_id, chart_path)
                 _feishu_patch_image(token, doc_token, img_block_id, file_token)
 
-    # 4. Grant access
-    _feishu_grant(token, doc_token, FEISHU_USER_OPENID)
+    # Grant access — admin + requesting user(s)
+    _grant_multi_users(token, doc_token, user_openids)
 
     doc_url = f"https://{FEISHU_DOC_DOMAIN}/docx/{doc_token}"
     return doc_url, doc_token, written
@@ -892,8 +922,13 @@ def _build_analysis_markdown(data: dict) -> str:
     return "\n".join(lines)
 
 
-def _publish_report_to_feishu(title, md_text, images, folder_token=None):
-    """Create Feishu doc with content and multiple images. Returns (url, doc_token, written)."""
+def _publish_report_to_feishu(title, md_text, images, folder_token=None,
+                              user_openids=None):
+    """Create Feishu doc with content and multiple images. Returns (url, doc_token, written).
+
+    Args:
+        user_openids: list of extra user open_ids to grant access (admin always included).
+    """
     token = _feishu_token()
     s = _get_feishu_session()
 
@@ -906,7 +941,7 @@ def _publish_report_to_feishu(title, md_text, images, folder_token=None):
     for img_info in images:
         img_path = img_info["path"]
         section_keyword = img_info["after_section"]
-        if not os.path.exists(img_path):
+        if not img_path or not os.path.exists(img_path):
             continue
 
         r = s.get(
@@ -945,8 +980,8 @@ def _publish_report_to_feishu(title, md_text, images, folder_token=None):
             file_token = _feishu_upload_image(token, img_block_id, img_path)
             _feishu_patch_image(token, doc_token, img_block_id, file_token)
 
-    # Grant access
-    _feishu_grant(token, doc_token, FEISHU_USER_OPENID)
+    # Grant access — admin + requesting user(s)
+    _grant_multi_users(token, doc_token, user_openids)
 
     doc_url = f"https://{FEISHU_DOC_DOMAIN}/docx/{doc_token}"
     return doc_url, doc_token, written
@@ -1288,17 +1323,22 @@ def cmd_report(args: list[str]):
       6. Publish to Feishu doc
     """
     if not args:
-        print("Usage: hydromas_call.py report \"自然语言问题\" [--role ...] [--folder TOKEN]")
+        print("Usage: hydromas_call.py report \"自然语言问题\" [--role ...] [--folder TOKEN] [--user-openid ID]")
         sys.exit(1)
 
     message = args[0]
     folder_token = None
+    user_openid = None
     i = 1
     while i < len(args):
         if args[i] == "--folder" and i + 1 < len(args):
             folder_token = args[i + 1]; i += 2
+        elif args[i] == "--user-openid" and i + 1 < len(args):
+            user_openid = args[i + 1]; i += 2
         else:
             i += 1
+
+    user_openids = [user_openid] if user_openid else None
 
     from datetime import datetime
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -1333,12 +1373,15 @@ def cmd_report(args: list[str]):
 
             title = f"HydroMAS — {message} ({now})"
             images = [
-                {"path": schematic_path, "after_section": "系统概念图"},
-                {"path": chart_path, "after_section": "过程线图"},
+                img for img in [
+                    {"path": schematic_path, "after_section": "系统概念图"},
+                    {"path": chart_path, "after_section": "过程线图"},
+                ] if img["path"]
             ]
             try:
-                doc_url, _, written = _publish_report_to_feishu(
-                    title, md_text, images, folder_token)
+                doc_url, doc_tok, written = _publish_report_to_feishu(
+                    title, md_text, images, folder_token, user_openids)
+                _record_report(user_openid or "", doc_tok, doc_url, title, "simulation")
                 analysis = result.get("analysis", {})
                 print(f"飞书文档: {doc_url}")
                 print(f"摘要: 水位 {analysis.get('initial_h', 0):.2f}m→{analysis.get('final_h', 0):.2f}m "
@@ -1355,6 +1398,7 @@ def cmd_report(args: list[str]):
         result = _post("/api/gateway/skill", {
             "skill_name": skill_name,
             "params": {},
+            "role": "operator",
         })
         if "error" in result:
             skill_name = None  # fall through to chat
@@ -1368,7 +1412,8 @@ def cmd_report(args: list[str]):
         elif any(k in msg_lower for k in ["控制", "优化", "设计", "pid", "mpc"]):
             role = "designer"
         result = _post("/api/gateway/chat", {
-            "message": message, "role": role, "session_id": "", "params": {},
+            "message": message, "role": role, "session_id": "",
+            "user_id": user_openid or "", "params": {},
         })
 
     if "error" in result:
@@ -1386,11 +1431,15 @@ def cmd_report(args: list[str]):
 
     try:
         if images:
-            doc_url, _, written = _publish_report_to_feishu(
-                title, md_text, images, folder_token)
+            doc_url, doc_tok, written = _publish_report_to_feishu(
+                title, md_text, images, folder_token, user_openids)
         else:
-            doc_url, _, written = _publish_to_feishu(
-                title, md_text, chart_path=None, folder_token=folder_token)
+            doc_url, doc_tok, written = _publish_to_feishu(
+                title, md_text, chart_path=None, folder_token=folder_token,
+                user_openids=user_openids)
+
+        _record_report(user_openid or "", doc_tok, doc_url, title,
+                       skill_name or "chat")
 
         # Build concise summary from result
         summary_parts = []
@@ -1416,6 +1465,82 @@ def cmd_report(args: list[str]):
         sys.exit(1)
 
 
+REPORT_HISTORY_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..",
+    "hydromas", "data", "report_history.jsonl"
+)
+# Normalize path
+REPORT_HISTORY_PATH = os.path.normpath(
+    os.environ.get("HYDROMAS_REPORT_HISTORY",
+                    "/home/admin/hydromas/data/report_history.jsonl")
+)
+
+
+def _record_report(user_id: str, doc_token: str, doc_url: str,
+                   title: str, skill: str):
+    """Append a report record to the JSONL history file."""
+    from datetime import datetime
+    record = {
+        "user_id": user_id or DEFAULT_USER_OPENID,
+        "doc_token": doc_token,
+        "doc_url": doc_url,
+        "title": title,
+        "skill": skill or "chat",
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    os.makedirs(os.path.dirname(REPORT_HISTORY_PATH), exist_ok=True)
+    with open(REPORT_HISTORY_PATH, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def _load_report_history(user_id: str | None = None,
+                         limit: int = 20) -> list[dict]:
+    """Load report history from JSONL, optionally filtered by user_id."""
+    if not os.path.exists(REPORT_HISTORY_PATH):
+        return []
+    records = []
+    with open(REPORT_HISTORY_PATH, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            rec = json.loads(line)
+            if user_id and rec.get("user_id") != user_id:
+                continue
+            records.append(rec)
+    records.reverse()  # newest first
+    return records[:limit]
+
+
+def cmd_history(args: list[str]):
+    """Show report history."""
+    user_id = None
+    limit = 20
+    i = 0
+    while i < len(args):
+        if args[i] == "--user-openid" and i + 1 < len(args):
+            user_id = args[i + 1]; i += 2
+        elif args[i] == "--limit" and i + 1 < len(args):
+            limit = int(args[i + 1]); i += 2
+        else:
+            i += 1
+
+    records = _load_report_history(user_id, limit)
+    if not records:
+        print("无报告记录。")
+        return
+
+    print(f"## 报告历史 (共 {len(records)} 条)\n")
+    print("| # | 时间 | 分析类型 | 标题 | 链接 |")
+    print("|---|------|---------|------|------|")
+    for idx, rec in enumerate(records, 1):
+        t = rec.get("created_at", "")[:16]
+        skill = rec.get("skill", "")
+        title = rec.get("title", "")[:30]
+        url = rec.get("doc_url", "")
+        print(f"| {idx} | {t} | {skill} | {title} | [查看]({url}) |")
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__)
@@ -1432,6 +1557,7 @@ def main():
         "skills": cmd_skills,
         "health": cmd_health,
         "roles": cmd_roles,
+        "history": cmd_history,
     }
 
     if cmd in commands:
