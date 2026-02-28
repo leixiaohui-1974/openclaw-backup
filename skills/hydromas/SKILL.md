@@ -17,24 +17,38 @@ tags: [hydromas, water, simulation, control, prediction, odd, dispatch]
 
 ## 快速调用
 
-### 1. 自然语言对话（推荐）
+### 1. 飞书文档报告（推荐，一键生成完整报告）
 
 ```bash
-python3 ~/.openclaw/workspace/skills/hydromas/scripts/hydromas_call.py chat "你的问题" [--role operator|researcher|designer]
+python3 ~/.openclaw/workspace/skills/hydromas/scripts/hydromas_call.py report "仿真双容水箱"
+python3 ~/.openclaw/workspace/skills/hydromas/scripts/hydromas_call.py report "运行四预闭环分析" --role operator
 ```
 
-**三种角色**：
-- `operator`（运维，默认）：四预系统、ODD检查、调度优化、日报、泄漏检测、水平衡
-- `researcher`（科研）：仿真建模、数据分析、预测评价、系统辨识、WNAL评估
-- `designer`（设计）：控制设计、优化设计、敏感性分析、蒸发优化、回用优化
+自动完成：HydroMAS 仿真 → matplotlib 图表 → 创建飞书文档 → 写入内容+插图 → 授权 → 返回文档链接。
 
-### 2. 直接调用技能
+### 2. 自然语言对话（纯文本+图表）
+
+```bash
+python3 ~/.openclaw/workspace/skills/hydromas/scripts/hydromas_call.py chat "仿真双容水箱"
+python3 ~/.openclaw/workspace/skills/hydromas/scripts/hydromas_call.py chat "运行四预闭环分析"
+```
+
+角色自动识别：含"仿真/模拟/水箱"→researcher，含"控制设计/PID"→designer，其余→operator
+
+### 3. 一键仿真+图表
+
+```bash
+python3 ~/.openclaw/workspace/skills/hydromas/scripts/hydromas_call.py sim 300 --title "双容水箱仿真"
+python3 ~/.openclaw/workspace/skills/hydromas/scripts/hydromas_call.py sim 600 --initial_h 1.0
+```
+
+### 4. 直接调用技能
 
 ```bash
 python3 ~/.openclaw/workspace/skills/hydromas/scripts/hydromas_call.py skill <技能名> [JSON参数]
 ```
 
-### 3. 查看可用技能
+### 5. 查看可用技能
 
 ```bash
 python3 ~/.openclaw/workspace/skills/hydromas/scripts/hydromas_call.py skills [--role operator]
@@ -66,14 +80,13 @@ python3 ~/.openclaw/workspace/skills/hydromas/scripts/hydromas_call.py skills [-
 ## 示例
 
 ```bash
-# 运维人员：一键四预
-python3 scripts/hydromas_call.py chat "运行四预闭环分析"
+# 生成飞书文档报告（推荐）
+python3 scripts/hydromas_call.py report "仿真双容水箱"
+python3 scripts/hydromas_call.py report "运行四预闭环分析"
+python3 scripts/hydromas_call.py report "设计水箱PID控制器"
 
-# 科研人员：仿真建模
+# 纯文本对话
 python3 scripts/hydromas_call.py chat "运行水箱仿真，面积2平方米，初始水位0.5米" --role researcher
-
-# 设计人员：控制设计
-python3 scripts/hydromas_call.py chat "设计水箱PID控制器" --role designer
 
 # 直接调用技能
 python3 scripts/hydromas_call.py skill forecast '{"horizon": 24}'
@@ -84,11 +97,13 @@ python3 scripts/hydromas_call.py skill daily_report '{"date": "2026-02-28"}'
 
 ```
 飞书用户 → OpenClaw Agent → hydromas_call.py → HydroMAS FastAPI (port 8000)
-                                                    ├── /api/gateway/chat    (NL对话)
-                                                    ├── /api/gateway/skill   (技能调用)
-                                                    ├── /api/gateway/roles   (角色查询)
-                                                    ├── /api/gateway/skills  (技能列表)
-                                                    └── /api/gateway/health  (健康检查)
+                                 │                  ├── /api/gateway/chat    (NL对话)
+                                 │                  ├── /api/gateway/skill   (技能调用)
+                                 │                  ├── /api/chart/render    (图表生成)
+                                 │                  └── /api/gateway/health  (健康检查)
+                                 │
+                                 └── report 命令 → 飞书 API (创建文档+写入+插图+授权)
+                                                       └── 返回文档链接给用户
 ```
 
 ## 服务管理

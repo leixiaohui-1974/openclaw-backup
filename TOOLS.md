@@ -34,7 +34,7 @@
 ## AI 图片生成
 
 - Engine: Gemini 3 Pro Image (nano-banana-pro)
-- API Key: `AIzaSyDY9bow9aXsUz70BCKxfmjzlQLstpbuQ40`
+- API Key: 从 openclaw.json gemini provider 读取（旧 key 已失效，需更换）
 - 分辨率: 1K/2K(推荐)/4K
 
 ## 关键目录
