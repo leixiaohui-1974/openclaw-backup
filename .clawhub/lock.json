@@ -12,6 +12,22 @@
     "nano-pdf": {
       "version": "1.0.0",
       "installedAt": 1772237613754
+    },
+    "summarize": {
+      "version": "1.0.0",
+      "installedAt": 1772238929218
+    },
+    "youtube-transcript-yt-dlp": {
+      "version": "1.0.5",
+      "installedAt": 1772239106336
+    },
+    "translate": {
+      "version": "1.0.0",
+      "installedAt": 1772239150319
+    },
+    "mermaid-diagrams": {
+      "version": "0.1.0",
+      "installedAt": 1772239188458
     }
   }
 }
