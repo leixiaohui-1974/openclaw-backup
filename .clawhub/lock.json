@@ -28,6 +28,38 @@
     "mermaid-diagrams": {
       "version": "0.1.0",
       "installedAt": 1772239188458
+    },
+    "humanize-ai-text": {
+      "version": "1.0.1",
+      "installedAt": 1772244005473
+    },
+    "find-skills": {
+      "version": "0.1.0",
+      "installedAt": 1772244365819
+    },
+    "video-frames": {
+      "version": "1.0.0",
+      "installedAt": 1772244569297
+    },
+    "blogwatcher": {
+      "version": "1.0.0",
+      "installedAt": 1772244604898
+    },
+    "nano-banana-pro": {
+      "version": "1.0.1",
+      "installedAt": 1772245569280
+    },
+    "auto-updater": {
+      "version": "1.0.0",
+      "installedAt": 1772245753780
+    },
+    "capability-evolver": {
+      "version": "1.14.0",
+      "installedAt": 1772245924407
+    },
+    "skill-creator": {
+      "version": "0.1.0",
+      "installedAt": 1772245990222
     }
   }
 }
