@@ -34,6 +34,8 @@ BT_CODE = 14
 BT_QUOTE = 15
 BT_DIVIDER = 22
 BT_IMAGE = 27
+BT_TABLE = 31
+BT_TABLE_CELL = 32
 
 
 # ══════════════════════════════════════════════════════════════
@@ -65,6 +67,91 @@ def create_blocks(token, doc_token, parent_id, blocks, index=-1):
     if d.get("code") != 0:
         return None, d
     return d["data"]["children"], None
+
+
+def _create_feishu_table(token, doc_token, rows, index=-1):
+    """Create a native Feishu table and populate cell content via PATCH."""
+    n_rows = len(rows)
+    n_cols = max(len(r) for r in rows) if rows else 0
+    if n_rows == 0 or n_cols == 0:
+        return False
+
+    table_block = {
+        "block_type": BT_TABLE,
+        "table": {"property": {"row_size": n_rows, "column_size": n_cols, "header_row": True, "column_width": [200] * n_cols}},
+    }
+    body = {"children": [table_block]}
+    if index >= 0:
+        body["index"] = index
+    r = requests.post(f"{FEISHU_BASE}/docx/v1/documents/{doc_token}/blocks/{doc_token}/children",
+                      headers=_headers(token), json=body)
+    d = r.json()
+    if d.get("code") != 0:
+        return False
+
+    cell_ids = d["data"]["children"][0].get("table", {}).get("cells", [])
+    if len(cell_ids) != n_rows * n_cols:
+        return False
+
+    for idx, cell_id in enumerate(cell_ids):
+        ri, ci = divmod(idx, n_cols)
+        cell_text = rows[ri][ci] if ci < len(rows[ri]) else ""
+        is_header = (ri == 0)
+        r2 = requests.get(f"{FEISHU_BASE}/docx/v1/documents/{doc_token}/blocks/{cell_id}/children",
+                         headers=_headers(token))
+        text_blocks = r2.json().get("data", {}).get("items", [])
+        if not text_blocks:
+            continue
+        text_block_id = text_blocks[0]["block_id"]
+        requests.patch(f"{FEISHU_BASE}/docx/v1/documents/{doc_token}/blocks/{text_block_id}",
+                      headers=_headers(token), json={"update_text_elements": {"elements": [{
+                          "text_run": {"content": cell_text or " ",
+                                       "text_element_style": {"bold": True} if is_header else {}}}]}})
+    return True
+
+
+def write_blocks(token, doc_token, blocks):
+    """Write a mixed list of regular blocks and table markers. Returns count."""
+    written = 0
+    batch = []
+
+    def _flush():
+        nonlocal written
+        if not batch:
+            return
+        for start in range(0, len(batch), 20):
+            chunk = batch[start:start + 20]
+            created, err = create_blocks(token, doc_token, doc_token, chunk)
+            if err:
+                for b in chunk:
+                    c, e = create_blocks(token, doc_token, doc_token, [b])
+                    if c:
+                        written += 1
+            else:
+                written += len(created)
+            time.sleep(0.3)
+        batch.clear()
+
+    for item in blocks:
+        if isinstance(item, dict) and item.get("_table"):
+            _flush()
+            ok = _create_feishu_table(token, doc_token, item["rows"])
+            if ok:
+                written += 1
+            else:
+                # Fallback to text rows
+                rows = item["rows"]
+                fallback = [{"block_type": BT_TEXT, "text": {"elements": [
+                    {"text_run": {"content": " | ".join(rows[0]), "text_element_style": {"bold": True}}}]}}]
+                for row in rows[1:]:
+                    fallback.append({"block_type": BT_TEXT, "text": {"elements": _text_elements(" | ".join(row))}})
+                c, e = create_blocks(token, doc_token, doc_token, fallback)
+                written += len(fallback) if not e else 0
+            time.sleep(0.3)
+        else:
+            batch.append(item)
+    _flush()
+    return written
 
 
 def get_children(token, doc_token):
@@ -246,7 +333,7 @@ def markdown_to_blocks(md_text):
             i += 1
             continue
 
-        # Table lines → convert each row to a text block (Feishu table API is complex)
+        # Table → native Feishu table block (block_type=31)
         if stripped.startswith('|'):
             table_lines = []
             while i < len(lines) and lines[i].strip().startswith('|'):
@@ -259,14 +346,7 @@ def markdown_to_blocks(md_text):
                 cells = [c.strip() for c in tl.strip('|').split('|')]
                 rows.append(cells)
             if rows:
-                # First row as bold header
-                blocks.append({"block_type": BT_TEXT, "text": {"elements": [
-                    {"text_run": {"content": " │ ".join(rows[0]), "text_element_style": {"bold": True}}}
-                ]}})
-                for row in rows[1:]:
-                    blocks.append({"block_type": BT_TEXT, "text": {
-                        "elements": _text_elements(" │ ".join(row))
-                    }})
+                blocks.append({"_table": True, "rows": rows})
             continue
 
         # Unordered list -
@@ -411,22 +491,8 @@ def run(config):
         blocks = markdown_to_blocks(md_text)
         print(f"  Parsed {len(blocks)} blocks")
 
-        # Write in small batches (飞书 API 对批量创建有限制)
-        batch_size = 20
-        for start in range(0, len(blocks), batch_size):
-            batch = blocks[start:start + batch_size]
-            created, err = create_blocks(token, doc_token, doc_token, batch, index=-1)
-            if err:
-                # Retry one by one
-                for bi, block in enumerate(batch):
-                    c, e = create_blocks(token, doc_token, doc_token, [block], index=-1)
-                    if c:
-                        content_written += 1
-                    else:
-                        print(f"    ⚠️ Block {start+bi} failed: {e.get('msg','')[:40]}")
-            else:
-                content_written += len(created)
-            time.sleep(0.3)
+        # Write blocks (handles native tables via descendants API)
+        content_written = write_blocks(token, doc_token, blocks)
 
         print(f"  ✅ {content_written}/{len(blocks)} blocks written")
 

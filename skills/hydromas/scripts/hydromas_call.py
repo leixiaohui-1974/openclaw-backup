@@ -38,6 +38,7 @@ FEISHU_DOC_DOMAIN = "leixiaohui1974.feishu.cn"
 BT_TEXT, BT_H2, BT_H3, BT_H4 = 2, 4, 5, 6
 BT_BULLET, BT_ORDERED, BT_CODE = 12, 13, 14
 BT_QUOTE, BT_DIVIDER, BT_IMAGE = 15, 22, 27
+BT_TABLE, BT_TABLE_CELL = 31, 32
 
 
 def _post(path: str, data: dict) -> dict:
@@ -439,6 +440,79 @@ def _feishu_create_blocks(token, doc_token, parent_id, blocks, index=-1):
     return d["data"]["children"], None
 
 
+def _feishu_create_table(token, doc_token, rows, index=-1):
+    """Create a native Feishu table and populate cell content.
+
+    Steps: 1) Create empty table  2) PATCH each cell's text block.
+    Returns True on success.
+    """
+    import requests
+    import time as tm
+
+    n_rows = len(rows)
+    n_cols = max(len(r) for r in rows) if rows else 0
+    if n_rows == 0 or n_cols == 0:
+        return False
+
+    # Step 1: Create empty table structure
+    table_block = {
+        "block_type": BT_TABLE,
+        "table": {
+            "property": {
+                "row_size": n_rows,
+                "column_size": n_cols,
+                "header_row": True,
+                "column_width": [200] * n_cols,
+            }
+        },
+    }
+    body = {"children": [table_block]}
+    if index >= 0:
+        body["index"] = index
+    r = requests.post(
+        f"{FEISHU_BASE}/docx/v1/documents/{doc_token}/blocks/{doc_token}/children",
+        headers=_feishu_headers(token), json=body)
+    d = r.json()
+    if d.get("code") != 0:
+        return False
+
+    cell_ids = d["data"]["children"][0].get("table", {}).get("cells", [])
+    if len(cell_ids) != n_rows * n_cols:
+        return False
+
+    # Step 2: PATCH each cell's text block with content
+    for idx, cell_id in enumerate(cell_ids):
+        ri, ci = divmod(idx, n_cols)
+        cell_text = rows[ri][ci] if ci < len(rows[ri]) else ""
+        is_header = (ri == 0)
+
+        # Get text block inside cell
+        r2 = requests.get(
+            f"{FEISHU_BASE}/docx/v1/documents/{doc_token}/blocks/{cell_id}/children",
+            headers=_feishu_headers(token))
+        d2 = r2.json()
+        text_blocks = d2.get("data", {}).get("items", [])
+        if not text_blocks:
+            continue
+
+        text_block_id = text_blocks[0]["block_id"]
+        patch_body = {
+            "update_text_elements": {
+                "elements": [{
+                    "text_run": {
+                        "content": cell_text or " ",
+                        "text_element_style": {"bold": True} if is_header else {},
+                    }
+                }]
+            }
+        }
+        requests.patch(
+            f"{FEISHU_BASE}/docx/v1/documents/{doc_token}/blocks/{text_block_id}",
+            headers=_feishu_headers(token), json=patch_body)
+
+    return True
+
+
 def _feishu_upload_image(token, parent_block_id, image_path):
     """Upload image to Feishu. Returns file_token."""
     import requests
@@ -544,7 +618,7 @@ def _md_to_feishu_blocks(md_text):
         if stripped.startswith('#### '):
             blocks.append(_make_block(BT_H4, "heading4", stripped[5:]))
             i += 1; continue
-        # Table → bold header + text rows
+        # Table → native Feishu table block (block_type=31)
         if stripped.startswith('|'):
             table_lines = []
             while i < len(lines) and lines[i].strip().startswith('|'):
@@ -557,13 +631,7 @@ def _md_to_feishu_blocks(md_text):
                 cells = [c.strip() for c in tl.strip('|').split('|')]
                 rows.append(cells)
             if rows:
-                blocks.append({"block_type": BT_TEXT, "text": {"elements": [
-                    {"text_run": {"content": " │ ".join(rows[0]), "text_element_style": {"bold": True}}}
-                ]}})
-                for row in rows[1:]:
-                    blocks.append({"block_type": BT_TEXT, "text": {
-                        "elements": _text_elements(" │ ".join(row))
-                    }})
+                blocks.append({"_table": True, "rows": rows})
             continue
         if stripped.startswith('- '):
             blocks.append(_make_block(BT_BULLET, "bullet", stripped[2:]))
@@ -599,6 +667,64 @@ def _md_to_feishu_blocks(md_text):
     return blocks
 
 
+def _feishu_write_blocks(token, doc_token, blocks):
+    """Write a mixed list of regular blocks and table markers to a Feishu doc.
+
+    Handles {"_table": True, "rows": [...]} entries via the descendants API,
+    and batches regular blocks via the children API.
+    Returns number of blocks written.
+    """
+    import time as tm
+    written = 0
+    batch = []
+
+    def _flush_batch():
+        nonlocal written
+        if not batch:
+            return
+        batch_size = 20
+        for start in range(0, len(batch), batch_size):
+            chunk = batch[start:start + batch_size]
+            created, err = _feishu_create_blocks(token, doc_token, doc_token, chunk)
+            if err:
+                for b in chunk:
+                    c, e = _feishu_create_blocks(token, doc_token, doc_token, [b])
+                    if c:
+                        written += 1
+            else:
+                written += len(created)
+            tm.sleep(0.3)
+        batch.clear()
+
+    for item in blocks:
+        if isinstance(item, dict) and item.get("_table"):
+            # Flush pending regular blocks first
+            _flush_batch()
+            # Create native table then PATCH cell content
+            rows = item["rows"]
+            ok = _feishu_create_table(token, doc_token, rows)
+            if ok:
+                written += 1
+            else:
+                # Fallback: write table as text rows
+                fallback = [{"block_type": BT_TEXT, "text": {"elements": [
+                    {"text_run": {"content": " │ ".join(rows[0]),
+                                  "text_element_style": {"bold": True}}}
+                ]}}]
+                for row in rows[1:]:
+                    fallback.append({"block_type": BT_TEXT, "text": {
+                        "elements": _text_elements(" │ ".join(row))
+                    }})
+                c, e = _feishu_create_blocks(token, doc_token, doc_token, fallback)
+                written += len(fallback) if not e else 0
+            tm.sleep(0.3)
+        else:
+            batch.append(item)
+
+    _flush_batch()
+    return written
+
+
 def _publish_to_feishu(title, md_text, chart_path=None, folder_token=None):
     """Create a Feishu doc, write content, insert chart, grant access. Returns doc URL."""
     import time
@@ -608,21 +734,9 @@ def _publish_to_feishu(title, md_text, chart_path=None, folder_token=None):
     # 1. Create doc
     doc_token = _feishu_create_doc(token, title, folder_token)
 
-    # 2. Write blocks
+    # 2. Write blocks (handles tables via descendants API)
     blocks = _md_to_feishu_blocks(md_text)
-    batch_size = 20
-    written = 0
-    for start in range(0, len(blocks), batch_size):
-        batch = blocks[start:start + batch_size]
-        created, err = _feishu_create_blocks(token, doc_token, doc_token, batch)
-        if err:
-            for b in batch:
-                c, e = _feishu_create_blocks(token, doc_token, doc_token, [b])
-                if c:
-                    written += 1
-        else:
-            written += len(created)
-        time.sleep(0.3)
+    written = _feishu_write_blocks(token, doc_token, blocks)
 
     # 3. Insert chart image
     if chart_path and os.path.exists(chart_path):
@@ -777,19 +891,7 @@ def _publish_report_to_feishu(title, md_text, images, folder_token=None):
     doc_token = _feishu_create_doc(token, title, folder_token)
 
     blocks = _md_to_feishu_blocks(md_text)
-    batch_size = 20
-    written = 0
-    for start in range(0, len(blocks), batch_size):
-        batch = blocks[start:start + batch_size]
-        created, err = _feishu_create_blocks(token, doc_token, doc_token, batch)
-        if err:
-            for b in batch:
-                c, e = _feishu_create_blocks(token, doc_token, doc_token, [b])
-                if c:
-                    written += 1
-        else:
-            written += len(created)
-        tm.sleep(0.3)
+    written = _feishu_write_blocks(token, doc_token, blocks)
 
     # Insert images at section markers
     import requests
