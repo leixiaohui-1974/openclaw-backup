@@ -198,7 +198,7 @@ def search_openalex(query, limit=10):
             "title": work.get("title", ""),
             "authors": authors,
             "year": str(work.get("publication_year", "")),
-            "journal": work.get("primary_location", {}).get("source", {}).get("display_name", "") if work.get("primary_location") else "",
+            "journal": ((work.get("primary_location") or {}).get("source") or {}).get("display_name", ""),
             "doi": doi,
             "citations": work.get("cited_by_count", 0),
             "source": "openalex"
@@ -544,7 +544,7 @@ def cmd_author(args):
                     oa_papers.append({
                         "title": w.get("title", ""),
                         "year": str(w.get("publication_year", "")),
-                        "journal": w.get("primary_location", {}).get("source", {}).get("display_name", "") if w.get("primary_location") else "",
+                        "journal": ((w.get("primary_location") or {}).get("source") or {}).get("display_name", ""),
                         "doi": doi,
                         "citations": w.get("cited_by_count", 0),
                         "source": "openalex"

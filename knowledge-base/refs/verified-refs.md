@@ -20,4 +20,5 @@
 
 | ID | 作者 | 年份 | 标题 | 期刊 | DOI | 验证 |
 |----|------|------|------|------|-----|------|
+| NEW-001 | Ye Wang, Vicenç Puig, Gabriela Cembrano | 2017 | Non-linear economic model predictive control of water distribution networks | Journal of Process Control | 10.1016/j.jprocont.2017.05.004 | ✅ crossref 2026-02-28 |
 <!-- 由 ref-checker / lit-agent 自动追加 -->
