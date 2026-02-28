@@ -5,6 +5,7 @@
 - [ ] **磁盘空间**: `df -h /` — 如果使用率 >85% 则告警，建议 `storage_manager.py archive`
 - [ ] **工作区备份**: 检查 `~/.openclaw/workspace/` 是否有未提交的改动，提醒用户用 `备份` 命令
 - [ ] **Docker 服务**: `docker ps` 确认 SearXNG 容器在运行
+- [ ] **HydroMAS 服务**: `curl -s http://localhost:8000/api/gateway/health` 确认 HydroMAS 运行正常，挂了则重启
 - [ ] **OSS 挂载**: `ls /home/admin/oss-workspace/` 确认 ossfs 挂载正常
 
 ## 每日一次（8:00-22:00 之间）
