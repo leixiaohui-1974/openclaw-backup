@@ -18,13 +18,17 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import sys
 import time as _time
 import urllib.request
 import urllib.error
+from concurrent.futures import ThreadPoolExecutor
+
+import requests as _req
 
 BASE_URL = "http://localhost:8000"
-TIMEOUT = 120
+TIMEOUT = 180  # bumped from 120 for large sims
 CHART_DIR = "/tmp/hydromas-charts"
 
 # ── Feishu config ──
@@ -39,6 +43,19 @@ BT_TEXT, BT_H2, BT_H3, BT_H4 = 2, 4, 5, 6
 BT_BULLET, BT_ORDERED, BT_CODE = 12, 13, 14
 BT_QUOTE, BT_DIVIDER, BT_IMAGE = 15, 22, 27
 BT_TABLE, BT_TABLE_CELL = 31, 32
+
+# ── Feishu token cache & session pool ──
+_feishu_token_cache: dict = {"token": None, "expires": 0}
+_feishu_session: _req.Session | None = None
+
+
+def _get_feishu_session() -> _req.Session:
+    """Return a reusable requests.Session (TCP connection pooling)."""
+    global _feishu_session
+    if _feishu_session is None:
+        _feishu_session = _req.Session()
+        _feishu_session.headers.update({"Content-Type": "application/json"})
+    return _feishu_session
 
 
 def _post(path: str, data: dict) -> dict:
@@ -397,28 +414,33 @@ def cmd_roles(args: list[str]):
 # ══════════════════════════════════════════════════════════════
 
 def _feishu_token():
-    """Get Feishu tenant_access_token."""
-    import requests
-    r = requests.post(f"{FEISHU_BASE}/auth/v3/tenant_access_token/internal",
-                      json={"app_id": FEISHU_APP_ID, "app_secret": FEISHU_APP_SECRET})
+    """Get Feishu tenant_access_token (cached for 55 min)."""
+    now = _time.time()
+    if _feishu_token_cache["token"] and now < _feishu_token_cache["expires"]:
+        return _feishu_token_cache["token"]
+    s = _get_feishu_session()
+    r = s.post(f"{FEISHU_BASE}/auth/v3/tenant_access_token/internal",
+               json={"app_id": FEISHU_APP_ID, "app_secret": FEISHU_APP_SECRET})
     d = r.json()
     if d.get("code") != 0:
         raise RuntimeError(f"Feishu auth failed: {d}")
+    _feishu_token_cache["token"] = d["tenant_access_token"]
+    _feishu_token_cache["expires"] = now + 55 * 60  # 55 min TTL
     return d["tenant_access_token"]
 
 
 def _feishu_headers(token):
-    return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    return {"Authorization": f"Bearer {token}"}
 
 
 def _feishu_create_doc(token, title, folder_token=None):
     """Create a new Feishu document. Returns doc_token."""
-    import requests
+    s = _get_feishu_session()
     body = {"title": title}
     if folder_token:
         body["folder_token"] = folder_token
-    r = requests.post(f"{FEISHU_BASE}/docx/v1/documents",
-                      headers=_feishu_headers(token), json=body)
+    r = s.post(f"{FEISHU_BASE}/docx/v1/documents",
+               headers=_feishu_headers(token), json=body)
     d = r.json()
     if d.get("code") != 0:
         raise RuntimeError(f"Create doc failed: {d}")
@@ -427,11 +449,11 @@ def _feishu_create_doc(token, title, folder_token=None):
 
 def _feishu_create_blocks(token, doc_token, parent_id, blocks, index=-1):
     """Create child blocks in a Feishu doc."""
-    import requests
+    s = _get_feishu_session()
     body = {"children": blocks}
     if index >= 0:
         body["index"] = index
-    r = requests.post(
+    r = s.post(
         f"{FEISHU_BASE}/docx/v1/documents/{doc_token}/blocks/{parent_id}/children",
         headers=_feishu_headers(token), json=body)
     d = r.json()
@@ -446,8 +468,7 @@ def _feishu_create_table(token, doc_token, rows, index=-1):
     Steps: 1) Create empty table  2) PATCH each cell's text block.
     Returns True on success.
     """
-    import requests
-    import time as tm
+    s = _get_feishu_session()
 
     n_rows = len(rows)
     n_cols = max(len(r) for r in rows) if rows else 0
@@ -469,7 +490,7 @@ def _feishu_create_table(token, doc_token, rows, index=-1):
     body = {"children": [table_block]}
     if index >= 0:
         body["index"] = index
-    r = requests.post(
+    r = s.post(
         f"{FEISHU_BASE}/docx/v1/documents/{doc_token}/blocks/{doc_token}/children",
         headers=_feishu_headers(token), json=body)
     d = r.json()
@@ -481,17 +502,16 @@ def _feishu_create_table(token, doc_token, rows, index=-1):
         return False
 
     # Step 2: PATCH each cell's text block with content
+    hdrs = _feishu_headers(token)
     for idx, cell_id in enumerate(cell_ids):
         ri, ci = divmod(idx, n_cols)
         cell_text = rows[ri][ci] if ci < len(rows[ri]) else ""
         is_header = (ri == 0)
 
-        # Get text block inside cell
-        r2 = requests.get(
+        r2 = s.get(
             f"{FEISHU_BASE}/docx/v1/documents/{doc_token}/blocks/{cell_id}/children",
-            headers=_feishu_headers(token))
-        d2 = r2.json()
-        text_blocks = d2.get("data", {}).get("items", [])
+            headers=hdrs)
+        text_blocks = r2.json().get("data", {}).get("items", [])
         if not text_blocks:
             continue
 
@@ -506,20 +526,20 @@ def _feishu_create_table(token, doc_token, rows, index=-1):
                 }]
             }
         }
-        requests.patch(
+        s.patch(
             f"{FEISHU_BASE}/docx/v1/documents/{doc_token}/blocks/{text_block_id}",
-            headers=_feishu_headers(token), json=patch_body)
+            headers=hdrs, json=patch_body)
 
     return True
 
 
 def _feishu_upload_image(token, parent_block_id, image_path):
     """Upload image to Feishu. Returns file_token."""
-    import requests
+    s = _get_feishu_session()
     with open(image_path, "rb") as f:
-        r = requests.post(
+        r = s.post(
             f"{FEISHU_BASE}/drive/v1/medias/upload_all",
-            headers={"Authorization": f"Bearer {token}"},
+            headers={"Authorization": f"Bearer {token}", "Content-Type": None},
             data={
                 "file_name": os.path.basename(image_path),
                 "parent_type": "docx_image",
@@ -535,8 +555,8 @@ def _feishu_upload_image(token, parent_block_id, image_path):
 
 def _feishu_patch_image(token, doc_token, block_id, file_token):
     """Patch an image block with an uploaded file."""
-    import requests
-    r = requests.patch(
+    s = _get_feishu_session()
+    r = s.patch(
         f"{FEISHU_BASE}/docx/v1/documents/{doc_token}/blocks/{block_id}",
         headers=_feishu_headers(token),
         json={"replace_image": {"token": file_token}})
@@ -547,8 +567,8 @@ def _feishu_patch_image(token, doc_token, block_id, file_token):
 
 def _feishu_grant(token, doc_token, openid, perm="full_access"):
     """Grant permission on a document."""
-    import requests
-    r = requests.post(
+    s = _get_feishu_session()
+    r = s.post(
         f"{FEISHU_BASE}/drive/v1/permissions/{doc_token}/members?type=docx",
         headers=_feishu_headers(token),
         json={"member_type": "openid", "member_id": openid, "perm": perm})
@@ -557,7 +577,6 @@ def _feishu_grant(token, doc_token, openid, perm="full_access"):
 
 def _text_elements(text):
     """Parse inline Markdown (bold, links) into Feishu text elements."""
-    import re
     elements = []
     pattern = r'(\*\*[^*]+\*\*|\[[^\]]+\]\([^)]+\))'
     parts = re.split(pattern, text)
@@ -570,7 +589,7 @@ def _text_elements(text):
                 "text_element_style": {"bold": True}
             }})
         else:
-            m = __import__("re").match(r'\[([^\]]+)\]\(([^)]+)\)', p)
+            m = re.match(r'\[([^\]]+)\]\(([^)]+)\)', p)
             if m:
                 elements.append({"text_run": {
                     "content": m.group(1),
@@ -592,7 +611,6 @@ def _make_block(block_type, field_name, text):
 
 def _md_to_feishu_blocks(md_text):
     """Convert Markdown text to Feishu block list."""
-    import re
     lines = md_text.split('\n')
     blocks = []
     i = 0
@@ -670,11 +688,10 @@ def _md_to_feishu_blocks(md_text):
 def _feishu_write_blocks(token, doc_token, blocks):
     """Write a mixed list of regular blocks and table markers to a Feishu doc.
 
-    Handles {"_table": True, "rows": [...]} entries via the descendants API,
+    Handles {"_table": True, "rows": [...]} entries via create+PATCH,
     and batches regular blocks via the children API.
     Returns number of blocks written.
     """
-    import time as tm
     written = 0
     batch = []
 
@@ -693,7 +710,7 @@ def _feishu_write_blocks(token, doc_token, blocks):
                         written += 1
             else:
                 written += len(created)
-            tm.sleep(0.3)
+            _time.sleep(0.1)
         batch.clear()
 
     for item in blocks:
@@ -717,7 +734,7 @@ def _feishu_write_blocks(token, doc_token, blocks):
                     }})
                 c, e = _feishu_create_blocks(token, doc_token, doc_token, fallback)
                 written += len(fallback) if not e else 0
-            tm.sleep(0.3)
+            _time.sleep(0.1)
         else:
             batch.append(item)
 
@@ -727,23 +744,18 @@ def _feishu_write_blocks(token, doc_token, blocks):
 
 def _publish_to_feishu(title, md_text, chart_path=None, folder_token=None):
     """Create a Feishu doc, write content, insert chart, grant access. Returns doc URL."""
-    import time
-
     token = _feishu_token()
+    s = _get_feishu_session()
 
-    # 1. Create doc
     doc_token = _feishu_create_doc(token, title, folder_token)
 
-    # 2. Write blocks (handles tables via descendants API)
     blocks = _md_to_feishu_blocks(md_text)
     written = _feishu_write_blocks(token, doc_token, blocks)
 
-    # 3. Insert chart image
+    # Insert chart image
     if chart_path and os.path.exists(chart_path):
-        time.sleep(0.5)
-        # Get current blocks to find last one
-        import requests
-        r = requests.get(
+        _time.sleep(0.2)
+        r = s.get(
             f"{FEISHU_BASE}/docx/v1/documents/{doc_token}/blocks/{doc_token}/children",
             headers=_feishu_headers(token), params={"page_size": 50})
         d = r.json()
@@ -885,25 +897,23 @@ def _build_analysis_markdown(data: dict) -> str:
 
 def _publish_report_to_feishu(title, md_text, images, folder_token=None):
     """Create Feishu doc with content and multiple images. Returns (url, doc_token, written)."""
-    import time as tm
-
     token = _feishu_token()
+    s = _get_feishu_session()
+
     doc_token = _feishu_create_doc(token, title, folder_token)
 
     blocks = _md_to_feishu_blocks(md_text)
     written = _feishu_write_blocks(token, doc_token, blocks)
 
     # Insert images at section markers
-    import requests
     for img_info in images:
         img_path = img_info["path"]
         section_keyword = img_info["after_section"]
         if not os.path.exists(img_path):
             continue
 
-        tm.sleep(0.5)
-        # Get current blocks
-        r = requests.get(
+        _time.sleep(0.2)
+        r = s.get(
             f"{FEISHU_BASE}/docx/v1/documents/{doc_token}/blocks/{doc_token}/children",
             headers=_feishu_headers(token), params={"page_size": 100})
         d = r.json()
@@ -977,13 +987,14 @@ def cmd_report(args: list[str]):
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
 
-    # Step 2: Generate schematic diagram
+    # Step 2+3: Generate charts in parallel
     params = result.get("parameters", {})
-    schematic_path = _generate_tank_schematic(params)
-
-    # Step 3: Generate process chart
     sim = result.get("simulation", {})
-    chart_path = _generate_chart_from_sim(sim, message)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f_schem = pool.submit(_generate_tank_schematic, params)
+        f_chart = pool.submit(_generate_chart_from_sim, sim, message)
+        schematic_path = f_schem.result()
+        chart_path = f_chart.result()
 
     # Step 4: Build comprehensive markdown
     md_text = _build_analysis_markdown(result)
@@ -998,32 +1009,31 @@ def cmd_report(args: list[str]):
         {"path": chart_path, "after_section": "过程线图"},
     ]
 
+    debug = os.environ.get("HYDROMAS_DEBUG", "").lower() in ("1", "true", "yes")
+
     try:
         doc_url, doc_token_val, written = _publish_report_to_feishu(
             title, md_text, images, folder_token)
 
-        print(f"## HydroMAS 分析报告已生成\n")
-        print(f"**飞书文档**: {doc_url}")
-        print(f"**文档标题**: {title}")
-        print(f"**内容块数**: {written}")
-        print(f"**概念图**: {schematic_path}")
-        print(f"**过程线图**: {chart_path}")
-        print(f"\n---\n")
-
-        # Print key findings summary for agent
+        # Concise output for agent → user
         analysis = result.get("analysis", {})
-        odd = result.get("odd_check", {})
-        print(f"**响应类型**: {analysis.get('response_type', '?')}")
-        print(f"**水位**: {analysis.get('initial_h', 0):.4f}m → {analysis.get('final_h', 0):.4f}m (Δ{analysis.get('h_change', 0):+.4f}m)")
-        print(f"**ODD状态**: {odd.get('status', '?')}")
-        if result.get("insights"):
-            print(f"\n**关键发现**:")
-            for ins in result["insights"][:3]:
-                print(f"  - {ins}")
-        if result.get("recommendations"):
-            print(f"\n**工程建议**:")
-            for rec in result["recommendations"]:
-                print(f"  - {rec}")
+        h_init = analysis.get("initial_h", 0)
+        h_final = analysis.get("final_h", 0)
+        h_change = analysis.get("h_change", 0)
+        print(f"飞书文档: {doc_url}")
+        print(f"摘要: 水位 {h_init:.2f}m→{h_final:.2f}m (Δ{h_change:+.2f}m)，{analysis.get('response_type', '')}")
+
+        if debug:
+            print(f"\n[DEBUG] 标题: {title}")
+            print(f"[DEBUG] 内容块: {written}, 概念图: {schematic_path}, 过程线: {chart_path}")
+            odd = result.get("odd_check", {})
+            print(f"[DEBUG] ODD状态: {odd.get('status', '?')}")
+            if result.get("insights"):
+                for ins in result["insights"][:3]:
+                    print(f"[DEBUG] 发现: {ins}")
+            if result.get("recommendations"):
+                for rec in result["recommendations"]:
+                    print(f"[DEBUG] 建议: {rec}")
 
     except Exception as e:
         print(f"飞书文档创建失败: {e}")
