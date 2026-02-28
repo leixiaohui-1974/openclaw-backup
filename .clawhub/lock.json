@@ -60,6 +60,46 @@
     "skill-creator": {
       "version": "0.1.0",
       "installedAt": 1772245990222
+    },
+    "chs-book-writer": {
+      "version": "1.0.0",
+      "installedAt": 1740700800000
+    },
+    "chs-paper-writer": {
+      "version": "1.0.0",
+      "installedAt": 1740700800000
+    },
+    "chs-reviewer": {
+      "version": "1.0.0",
+      "installedAt": 1740700800000
+    },
+    "chs-ref-checker": {
+      "version": "1.0.0",
+      "installedAt": 1740700800000
+    },
+    "chs-file-converter": {
+      "version": "1.0.0",
+      "installedAt": 1740700800000
+    },
+    "chs-figure-generator": {
+      "version": "1.0.0",
+      "installedAt": 1740700800000
+    },
+    "chs-research": {
+      "version": "1.0.0",
+      "installedAt": 1740700800000
+    },
+    "chs-digital-twin": {
+      "version": "1.0.0",
+      "installedAt": 1740700800000
+    },
+    "mcp-academic-search": {
+      "version": "1.0.0",
+      "installedAt": 1740700800000
+    },
+    "ref-search": {
+      "version": "1.0.0",
+      "installedAt": 1740700800000
     }
   }
 }
