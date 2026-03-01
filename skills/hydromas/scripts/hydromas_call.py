@@ -1136,41 +1136,414 @@ def _is_simulation_request(message: str) -> bool:
     return False
 
 
+# ── Default parameters for each skill (based on alumina plant config) ──
+
+# ── Default parameters for each skill (alumina plant real operating data) ──
+# Node format: node_id + node_type required by calc_full_plant_balance
+_ALUMINA_NODES = [
+    {"node_id": "water_treatment", "node_type": "intake", "q_in": 433, "q_out": 420, "q_loss": 13},
+    {"node_id": "clear_pool", "node_type": "pool", "q_in": 420, "q_out": 415, "q_loss": 5, "volume": 6000, "capacity": 8000},
+    {"node_id": "high_pool", "node_type": "pool", "q_in": 665, "q_out": 650, "q_loss": 15, "volume": 10000, "capacity": 15000},
+    {"node_id": "ws_dissolution", "node_type": "workshop", "q_in": 158, "q_out": 140, "q_loss": 18},
+    {"node_id": "ws_evaporation", "node_type": "workshop", "q_in": 50, "q_out": 42, "q_loss": 8},
+    {"node_id": "ws_decomposition", "node_type": "workshop", "q_in": 21, "q_out": 19, "q_loss": 2},
+    {"node_id": "ws_red_mud", "node_type": "workshop", "q_in": 136, "q_out": 100, "q_loss": 36},
+    {"node_id": "ws_calcination", "node_type": "workshop", "q_in": 33, "q_out": 20, "q_loss": 13},
+    {"node_id": "ws_raw_material", "node_type": "workshop", "q_in": 17, "q_out": 15, "q_loss": 2},
+    {"node_id": "ws_auxiliary", "node_type": "workshop", "q_in": 18, "q_out": 16, "q_loss": 2},
+    {"node_id": "cooling_towers", "node_type": "workshop", "q_in": 175, "q_out": 0, "q_loss": 0, "q_evap": 175},
+    {"node_id": "reuse_station", "node_type": "reuse", "q_in": 250, "q_out": 240, "q_loss": 10},
+]
+# Edge format: [source_id, dest_id] pairs
+_ALUMINA_EDGES = [
+    ["water_treatment", "clear_pool"],
+    ["clear_pool", "high_pool"],
+    ["high_pool", "ws_dissolution"],
+    ["high_pool", "ws_evaporation"],
+    ["high_pool", "ws_decomposition"],
+    ["high_pool", "ws_red_mud"],
+    ["high_pool", "ws_calcination"],
+    ["high_pool", "ws_raw_material"],
+    ["high_pool", "ws_auxiliary"],
+    ["high_pool", "cooling_towers"],
+    ["ws_dissolution", "reuse_station"],
+    ["ws_evaporation", "reuse_station"],
+    ["reuse_station", "high_pool"],
+]
+_TOWER_PARAMS = {
+    "water_flow_m3h": 500, "t_in": 42, "t_out": 32, "n_cells": 4, "fan_power_kw": 55,
+}
+_WEATHER = {"t_db": 28, "t_wb": 22, "humidity": 0.65, "wind_speed": 2.5}
+# calc_params for predict_calcination_evap: slurry_flow, moisture, temp
+_CALC_PARAMS = {"slurry_flow": 25.0, "moisture": 0.15, "temp": 1000}
+# mud_params for predict_red_mud_water: mud_mass, moisture_ratio
+_MUD_PARAMS = {"mud_mass": 800, "moisture_ratio": 0.55}
+
+_SKILL_DEFAULTS: dict[str, dict] = {
+    "evap_optimization": {
+        "tower_params": _TOWER_PARAMS,
+        "weather": _WEATHER,
+        "calc_params": _CALC_PARAMS,
+        "mud_params": _MUD_PARAMS,
+    },
+    "global_dispatch": {
+        # Skill reads "historical_demand"; internally passes as "historical_data" to MCP tool
+        "historical_demand": [10200, 10400, 10350, 10500, 10380, 10450, 10400],
+        "weather_forecast": [
+            {"t_db": 28, "t_wb": 22, "humidity": 0.65, "wind_speed": 2.5},
+            {"t_db": 30, "t_wb": 23, "humidity": 0.60, "wind_speed": 3.0},
+            {"t_db": 27, "t_wb": 21, "humidity": 0.70, "wind_speed": 2.0},
+        ],
+        # optimize_global_dispatch expects: demand_forecast, supply_config
+        "supply_config": {
+            "wujiang": {"capacity": 7800},
+            "flood_channel": {"capacity": 2600},
+        },
+    },
+    "daily_report": {
+        "nodes_data": _ALUMINA_NODES,
+        "edges_data": _ALUMINA_EDGES,
+        "tower_params": _TOWER_PARAMS,
+        "weather": _WEATHER,
+        "calc_params": _CALC_PARAMS,
+        "mud_params": _MUD_PARAMS,
+    },
+    "leak_diagnosis": {
+        "nodes_data": _ALUMINA_NODES,
+        "edges_data": _ALUMINA_EDGES,
+    },
+    "reuse_scheduling": {
+        "sources": [
+            {"id": "ws_dissolution_out", "flow_m3d": 3360, "quality": {"tds": 800, "ph": 12}},
+            {"id": "ws_evaporation_out", "flow_m3d": 1008, "quality": {"tds": 500, "ph": 10}},
+            {"id": "ws_decomposition_out", "flow_m3d": 456, "quality": {"tds": 300, "ph": 9}},
+        ],
+        "demands": [
+            {"id": "cooling_towers", "flow_m3d": 4200, "quality_req": {"tds_max": 1000, "ph_range": [6, 10]}},
+            {"id": "ws_raw_material", "flow_m3d": 400, "quality_req": {"tds_max": 2000}},
+        ],
+    },
+    "odd_assessment": {
+        "current_state": {
+            "total_intake": 10400, "reuse_rate": 0.36,
+            "reservoir_level": 0.75, "total_demand": 350,
+        },
+        "system_capabilities": {
+            "sensing": 65, "communication": 70, "modeling": 55,
+            "prediction": 60, "control": 50, "odd_monitoring": 45,
+            "decision_support": 40,
+        },
+    },
+    "data_analysis_predict": {
+        "raw_data": [
+            1.0, 0.98, 0.95, 0.93, 0.90, 0.88, 0.85, 0.83, 0.82, 0.80,
+            0.79, 0.78, 0.77, 0.76, 0.76, 0.75, 0.75, 0.74, 0.74, 0.74,
+        ],
+        "horizon": 10,
+        "model": "linear",
+    },
+    "control_system_design": {},
+}
+
+
+def _get_skill_defaults(skill_name: str) -> dict:
+    """Return default parameters for a skill, based on the alumina plant config."""
+    return _SKILL_DEFAULTS.get(skill_name, {})
+
+
 def _humanize_key(key: str) -> str:
-    """Convert snake_case keys to human-readable Chinese labels."""
+    """Convert snake_case keys to human-readable bilingual (Chinese + English) labels.
+    将 snake_case 键名转换为中英文双语标签。"""
     KEY_MAP = {
-        "initial_h": "初始水位 (m)", "final_h": "最终水位 (m)",
-        "h_change": "水位变化 (m)", "h_max_sim": "最高水位 (m)",
-        "h_min_sim": "最低水位 (m)", "volume_change_m3": "体积变化 (m³)",
-        "duration": "时长 (s)", "dt": "时间步长 (s)",
-        "controller_type": "控制器类型", "setpoint": "设定值",
-        "performance_metrics": "性能指标", "rmse": "RMSE",
-        "mae": "MAE", "settling_time": "调节时间 (s)",
-        "overshoot": "超调量 (%)", "rise_time": "上升时间 (s)",
-        "forecast": "预报结果", "warning": "预警信息",
-        "warning_level": "预警等级", "rehearsal": "预演方案",
-        "plan": "应急预案", "summary": "摘要",
-        "open_loop_simulation": "开环仿真", "identification": "系统辨识",
-        "control_simulation": "闭环仿真", "success": "执行状态",
-        "steps_completed": "完成步骤", "execution_time": "执行时间 (s)",
-        "q_in_total_m3": "总入流 (m³)", "q_out_total_m3": "总出流 (m³)",
-        "mass_balance_error_m3": "质量守恒误差 (m³)",
-        "response_type": "响应类型", "is_steady_state": "是否达稳态",
-        "h_steady_state_theory": "理论稳态水位 (m)",
-        "time_constant_s": "时间常数 (s)",
-        "risk_threshold": "风险阈值", "risk_score": "风险得分",
-        "status": "状态", "level": "等级", "message": "信息",
-        "reuse_rate": "回用率", "water_saving": "节水量",
-        "leak_location": "泄漏位置", "leak_probability": "泄漏概率",
-        "evaporation_loss": "蒸发损失", "total_loss": "总损失",
+        # ── 仿真 / Simulation ──
+        "initial_h": "初始水位 Initial Level (m)",
+        "final_h": "最终水位 Final Level (m)",
+        "h_change": "水位变化 Level Change (m)",
+        "h_max_sim": "最高水位 Max Level (m)",
+        "h_min_sim": "最低水位 Min Level (m)",
+        "volume_change_m3": "体积变化 Volume Change (m³)",
+        "duration": "时长 Duration (s)",
+        "dt": "时间步长 Time Step (s)",
+        "tank_area": "水箱面积 Tank Area (m²)",
+        "max_level": "最大水位 Max Level (m)",
+        "min_level": "最小水位 Min Level (m)",
+        "final_level": "最终水位 Final Level (m)",
+        "level_range": "水位范围 Level Range",
+        "time": "时间 Time",
+        "water_level": "水位 Water Level",
+        "outflow": "出流 Outflow",
+        "inflow": "入流 Inflow",
+        "inflow_rate": "入流量 Inflow Rate",
+        # ── 控制 / Control ──
+        "controller_type": "控制器类型 Controller Type",
+        "setpoint": "设定值 Setpoint",
+        "performance_metrics": "性能指标 Performance Metrics",
+        "control_output": "控制输出 Control Output",
+        "error": "误差 Error",
+        "settling_time": "调节时间 Settling Time (s)",
+        "overshoot": "超调量 Overshoot (%)",
+        "rise_time": "上升时间 Rise Time (s)",
+        "steady_state_error": "稳态误差 Steady-State Error",
+        "response_time": "响应时间 Response Time (s)",
+        "open_loop_simulation": "开环仿真 Open-Loop Sim",
+        "control_simulation": "闭环仿真 Closed-Loop Sim",
+        "response_type": "响应类型 Response Type",
+        "is_steady_state": "是否达稳态 Steady State",
+        "h_steady_state_theory": "理论稳态水位 Theoretical SS Level (m)",
+        "time_constant_s": "时间常数 Time Constant (s)",
+        # ── 辨识 / Identification ──
+        "identification": "系统辨识 System ID",
+        "identified_params": "辨识参数 Identified Params",
+        "fit_error": "拟合误差 Fit Error",
+        "model_type": "模型类型 Model Type",
+        # ── 预测 / Prediction ──
+        "forecast": "预报结果 Forecast",
+        "predictions": "预测值 Predictions",
+        "confidence_upper": "置信区间上界 Confidence Upper",
+        "confidence_lower": "置信区间下界 Confidence Lower",
+        "confidence_level": "置信水平 Confidence Level",
+        "horizon": "预测期数 Forecast Horizon",
+        "model": "预测模型 Model",
+        "backtest": "回测 Backtest",
+        "backtest_fitted": "回测拟合值 Backtest Fitted",
+        "cleaned_data": "清洗后数据 Cleaned Data",
+        "cleaned_timeseries": "清洗后时序 Cleaned Series",
+        "accuracy": "精度 Accuracy",
+        # ── 预警 / Warning ──
+        "warning": "预警信息 Warning",
+        "warning_level": "预警等级 Warning Level",
+        "rehearsal": "预演方案 Rehearsal",
+        "plan": "应急预案 Plan",
+        "risk_threshold": "风险阈值 Risk Threshold",
+        "risk_score": "风险得分 Risk Score",
+        # ── 水量平衡 / Water Balance ──
+        "total_intake": "总取水量 Total Intake (m³/d)",
+        "total_consumption": "总消耗量 Total Consumption (m³/d)",
+        "total_loss": "总漏损 Total Loss (m³/d)",
+        "total_evap": "总蒸发 Total Evaporation (m³/d)",
+        "balance_error": "平衡误差 Balance Error (m³)",
+        "residual": "残差 Residual",
+        "is_balanced": "是否平衡 Balanced",
+        "node_residuals": "节点残差 Node Residuals",
+        "node_type": "节点类型 Node Type",
+        "q_in_total_m3": "总入流 Total Inflow (m³)",
+        "q_out_total_m3": "总出流 Total Outflow (m³)",
+        "mass_balance_error_m3": "质量守恒误差 Mass Balance Error (m³)",
+        "balance": "平衡 Balance",
+        "balance_data": "平衡数据 Balance Data",
+        "nodes": "节点 Nodes",
+        "edges": "边 Edges",
+        # ── 蒸发 / Evaporation ──
+        "evaporation": "蒸发 Evaporation",
+        "evaporation_loss": "蒸发损失 Evaporation Loss",
+        "evap_daily_m3": "日蒸发量 Daily Evap (m³)",
+        "evap_rate_m3h": "蒸发速率 Evap Rate (m³/h)",
+        "evap_ratio": "蒸发比 Evap Ratio",
+        "total_daily_m3": "日总蒸发量 Total Daily Evap (m³)",
+        "total_hourly_m3": "时总蒸发量 Total Hourly Evap (m³/h)",
+        "water_carry_m3d": "日带水量 Daily Water Carry (m³)",
+        "water_carry_m3h": "时带水量 Hourly Water Carry (m³/h)",
+        "cooling_tower": "冷却塔 Cooling Tower",
+        "calcination": "焙烧 Calcination",
+        "red_mud": "赤泥 Red Mud",
+        "breakdown": "分项明细 Breakdown",
+        # ── 泄漏检测 / Leak Detection ──
+        "leak_detected": "泄漏检测 Leak Detected",
+        "leak_location": "泄漏位置 Leak Location",
+        "leak_probability": "泄漏概率 Leak Probability",
+        "anomaly_scores": "异常分数 Anomaly Scores",
+        "max_score": "最大分数 Max Score",
+        "suspects": "嫌疑管段 Suspect Pipes",
+        "n_suspects": "嫌疑管段数 Num Suspects",
+        "pipe_id": "管段标识 Pipe ID",
+        "pipe_segment": "管段 Pipe Segment",
+        "confidence": "置信度 Confidence",
+        "attention_weight": "关注权重 Attention Weight",
+        "connected_nodes": "连接节点 Connected Nodes",
+        "fused_results": "融合结果 Fused Results",
+        "combined_confidence": "综合置信度 Combined Confidence",
+        "evidence": "证据 Evidence",
+        # ── 回用 / Reuse ──
+        "reuse_rate": "回用率 Reuse Rate",
+        "new_reuse_rate": "新回用率 New Reuse Rate",
+        "current_reuse_rate": "当前回用率 Current Reuse Rate",
+        "matched_sources": "匹配水源 Matched Sources",
+        "matched_demands": "匹配需求 Matched Demands",
+        "matched_paths": "匹配路径 Matched Paths",
+        "unmatched": "未匹配 Unmatched",
+        "source_quality": "源水质 Source Quality",
+        "n_matched": "匹配数 Matched Count",
+        "n_unmatched": "未匹配数 Unmatched Count",
+        "quality_margin": "水质裕度 Quality Margin",
+        "cod_margin": "COD裕度 COD Margin",
+        "turbidity_margin": "浊度裕度 Turbidity Margin",
+        "rejection_reasons": "拒绝理由 Rejection Reasons",
+        "total_reuse_m3d": "总回用量 Total Reuse (m³/d)",
+        "total_demand_m3d": "总需求 Total Demand (m³/d)",
+        "reuse_volume": "回用量 Reuse Volume",
+        "water_saving": "节水量 Water Saving",
+        "improvement": "改进幅度 Improvement",
+        "daily_savings_m3": "日节水量 Daily Savings (m³)",
+        "annual_savings_m3": "年节水量 Annual Savings (m³)",
+        "daily_cost_saving_cny": "日节省费用 Daily Savings (CNY)",
+        "annual_cost_saving_cny": "年节省费用 Annual Savings (CNY)",
+        "water_price_cny_per_m3": "水价 Water Price (CNY/m³)",
+        # ── 调度 / Dispatch ──
+        "schedule": "调度方案 Schedule",
+        "dispatch_commands": "调度指令 Dispatch Commands",
+        "total_demand": "总需求 Total Demand",
+        "total_supply": "总供水 Total Supply",
+        "allocation": "分配 Allocation",
+        "deficit": "短缺 Deficit",
+        "rule_applied": "应用规则 Rule Applied",
+        "priority": "优先级 Priority",
+        "best_scheme": "最优方案 Best Scheme",
+        "rank": "排名 Rank",
+        "scheme_index": "方案索引 Scheme Index",
+        "label": "标签 Label",
+        "total_score": "总分 Total Score",
+        "safety_score": "安全分 Safety Score",
+        "efficiency_score": "效率分 Efficiency Score",
+        "cost_score": "成本分 Cost Score",
+        "cost": "成本 Cost",
+        "feasible": "可行性 Feasibility",
+        "rule": "规则 Rule",
+        "method": "方法 Method",
+        "source_id": "水源标识 Source ID",
+        "target_id": "目标标识 Target ID",
+        "volume_m3d": "体积 Volume (m³/d)",
+        # ── ODD / 运行设计域 ──
+        "current_odd_status": "当前ODD状态 Current ODD Status",
+        "scan_results": "边界扫描结果 Scan Results",
+        "odd_zone": "ODD区域 ODD Zone",
+        "odd_violations": "ODD越界 ODD Violations",
+        "odd_assessment": "ODD评估 ODD Assessment",
+        "worst_zone": "最坏区域 Worst Zone",
+        "time_to_breach": "越界时间 Time to Breach",
+        "violations": "越界情况 Violations",
+        "n_violations": "越界数 Num Violations",
+        "recommended_action": "推荐行动 Recommended Action",
+        "zone": "区域 Zone",
+        "bounds": "边界 Bounds",
+        "n_checked": "检查数 Num Checked",
+        "mrc_plan": "最小风险方案 MRC Plan",
+        "safety_verification": "安全验证 Safety Verification",
+        "approved": "是否批准 Approved",
+        "safety_rating": "安全评级 Safety Rating",
+        "non_engineering_measures": "非工程措施 Non-Engineering Measures",
+        "reporting_flow": "上报流程 Reporting Flow",
+        "current_zone": "当前区域 Current Zone",
+        "scenarios_tested": "测试方案数 Scenarios Tested",
+        "scenarios_with_violations": "有越界方案数 Scenarios with Violations",
+        "scenario": "方案 Scenario",
+        "forecast_used": "使用的预报 Forecast Used",
+        # ── WNAL / 水网自主等级 ──
+        "wnal_assessment": "WNAL水网自主等级评估 WNAL Assessment",
+        "wnal_level": "WNAL等级 WNAL Level",
+        "wnal_score": "WNAL分数 WNAL Score",
+        "wnal_gaps": "WNAL差距 WNAL Gaps",
+        "overall_assessment": "总体评估 Overall Assessment",
+        "level_description": "等级描述 Level Description",
+        "score": "分数 Score",
+        "total_weighted": "总加权分 Total Weighted",
+        "max_possible": "最大可能分 Max Possible",
+        "recommendations": "改进建议 Recommendations",
+        "capability": "能力 Capability",
+        "raw_score": "原始分数 Raw Score",
+        "weight": "权重 Weight",
+        "weighted_score": "加权分数 Weighted Score",
+        "gap": "差距 Gap",
+        "improvement_impact": "改进影响 Improvement Impact",
+        "dimensions": "维度 Dimensions",
+        # ── KPI / 关键绩效指标 ──
+        "rmse": "均方根误差 RMSE",
+        "mae": "平均绝对误差 MAE",
+        "RMSE": "均方根误差 RMSE",
+        "MAE": "平均绝对误差 MAE",
+        "MAPE": "平均绝对百分比误差 MAPE",
+        "NSE": "纳什效率系数 NSE",
+        "r_squared": "决定系数 R²",
+        "kpi_score": "KPI分数 KPI Score",
+        "pump_efficiency": "泵效率 Pump Efficiency",
+        "water_per_ton_alumina": "吨氧化铝用水量 Water/Ton Alumina",
+        # ── 异常检测 / Anomaly Detection ──
+        "anomalies": "异常项 Anomalies",
+        "anomaly_count": "异常数 Anomaly Count",
+        "classification": "分类 Classification",
+        "outliers": "异常值 Outliers",
+        "n_outliers": "异常值数 Num Outliers",
+        "removed_indices": "移除索引 Removed Indices",
+        # ── 设计 / Design ──
+        "supply_capacity": "供水能力 Supply Capacity",
+        "min_reserve_time": "最小储备时间 Min Reserve Time",
+        "peak_demand": "峰值需求 Peak Demand",
+        "optimal_area": "优化面积 Optimal Area",
+        "optimal_height": "优化高度 Optimal Height",
+        "capacity": "容量 Capacity",
+        "sensitivity_indices": "敏感性指数 Sensitivity Indices",
+        "ranking": "排列 Ranking",
+        "parameter_ranges": "参数范围 Parameter Ranges",
+        # ── 通用 / General ──
+        "summary": "摘要 Summary",
+        "status": "状态 Status",
+        "level": "等级 Level",
+        "message": "信息 Message",
+        "success": "执行状态 Success",
+        "steps_completed": "完成步骤 Steps Completed",
+        "execution_time": "执行时间 Execution Time (s)",
+        "data": "数据 Data",
+        "details": "详情 Details",
+        "date": "日期 Date",
+        "report_markdown": "报告内容 Report",
+        "target_config": "目标配置 Target Config",
+        "sensor_id": "传感器标识 Sensor ID",
+        "timestamp": "时间戳 Timestamp",
+        "amplitude_db": "幅值 Amplitude (dB)",
+        "frequency_hz": "频率 Frequency (Hz)",
+        "n_results": "结果数 Num Results",
+        # ── 技能名称 / Skill Names ──
+        "daily_report": "日运营报告 Daily Report",
+        "odd_assessment": "ODD安全评估 ODD Assessment",
+        "data_analysis_predict": "数据分析预测 Data Analysis & Prediction",
+        "control_system_design": "控制系统设计 Control System Design",
+        "evap_optimization": "蒸发优化 Evaporation Optimization",
+        "global_dispatch": "全局调度优化 Global Dispatch",
+        "leak_diagnosis": "泄漏诊断 Leak Diagnosis",
+        "reuse_scheduling": "回用调度 Reuse Scheduling",
+        "four_prediction_loop": "四预闭环 Four-Prediction Loop",
+        "forecast_skill": "预报 Forecast",
+        "warning_skill": "预警 Warning",
+        "rehearsal_skill": "预演 Rehearsal",
+        "plan_skill": "预案 Plan",
+        "full_lifecycle": "全生命周期 Full Lifecycle",
+        "optimization_design": "优化设计 Optimization Design",
     }
     if key in KEY_MAP:
         return KEY_MAP[key]
-    return key.replace("_", " ").replace("-", " ").title()
+    # Fallback: attempt basic word-level Chinese translation for common terms
+    WORD_MAP = {
+        "total": "总", "max": "最大", "min": "最小", "avg": "平均",
+        "rate": "率", "count": "计数", "num": "数量", "score": "分数",
+        "water": "水", "level": "水位", "flow": "流量", "pipe": "管道",
+        "node": "节点", "edge": "边", "loss": "损失", "gain": "增益",
+        "input": "输入", "output": "输出", "error": "误差", "time": "时间",
+        "daily": "日", "annual": "年", "monthly": "月", "hourly": "时",
+        "pressure": "压力", "quality": "水质", "energy": "能耗",
+        "pump": "泵", "valve": "阀门", "tank": "水箱", "tower": "塔",
+        "demand": "需求", "supply": "供给", "balance": "平衡",
+    }
+    english_title = key.replace("_", " ").replace("-", " ").title()
+    # Try to build a partial Chinese prefix from known words
+    words = key.lower().replace("-", "_").split("_")
+    cn_parts = [WORD_MAP[w] for w in words if w in WORD_MAP]
+    if cn_parts:
+        return "".join(cn_parts) + " " + english_title
+    return english_title
 
 
 def _format_value(v) -> str:
-    """Format a value for display in a table cell."""
+    """Format a value for display in a table cell.
+    将值格式化为中文友好的表格单元格内容。"""
     if v is None:
         return "-"
     if isinstance(v, bool):
@@ -1179,7 +1552,24 @@ def _format_value(v) -> str:
         if abs(v) < 0.001 and v != 0:
             return f"{v:.6f}"
         return f"{v:.4f}"
-    return str(v)
+    # Translate common English status/value strings to bilingual
+    VALUE_MAP = {
+        "safe": "安全 Safe", "at_risk": "有风险 At Risk", "danger": "危险 Danger",
+        "normal": "正常 Normal", "extended": "扩展 Extended", "mrc": "最小风险 MRC",
+        "completed": "已完成 Completed", "failed": "失败 Failed",
+        "pending": "待处理 Pending", "running": "运行中 Running",
+        "unknown": "未知 Unknown", "none": "无 None",
+        "low": "低 Low", "medium": "中 Medium", "high": "高 High",
+        "critical": "严重 Critical",
+        "linear": "线性 Linear", "polynomial": "多项式 Polynomial",
+        "lstm": "LSTM神经网络",
+        "True": "是", "False": "否",
+        "true": "是", "false": "否",
+    }
+    s = str(v)
+    if s in VALUE_MAP:
+        return VALUE_MAP[s]
+    return s
 
 
 def _render_dict_to_md(d: dict, lines: list, level: int = 2):
@@ -1251,6 +1641,39 @@ def _render_dict_to_md(d: dict, lines: list, level: int = 2):
                 lines.append("")
 
 
+def _trim_large_data(data: dict, max_list_items: int = 5, max_depth: int = 4) -> dict:
+    """Trim large nested data to prevent massive reports.
+    限制嵌套数据大小以避免报告过大。
+    """
+    import copy
+
+    def _trim(obj, depth=0):
+        if depth > max_depth:
+            if isinstance(obj, dict):
+                return {f"...{len(obj)} items...": "..."}
+            if isinstance(obj, list):
+                return [f"...{len(obj)} items..."]
+            return obj
+        if isinstance(obj, dict):
+            trimmed = {}
+            for k, v in obj.items():
+                # Skip keys that produce massive output
+                if k in ("step_results", "forecast_series") and isinstance(v, list) and len(v) > max_list_items:
+                    trimmed[k] = f"[{len(v)} entries, showing first {max_list_items}]"
+                    continue
+                trimmed[k] = _trim(v, depth + 1)
+            return trimmed
+        if isinstance(obj, list):
+            if len(obj) > max_list_items and all(isinstance(x, dict) for x in obj):
+                return [_trim(x, depth + 1) for x in obj[:max_list_items]] + [
+                    {f"... and {len(obj) - max_list_items} more": ""}
+                ]
+            return [_trim(x, depth + 1) for x in obj]
+        return obj
+
+    return _trim(copy.deepcopy(data))
+
+
 def _build_adaptive_report(message: str, result: dict, skill_name: str | None = None) -> str:
     """Build a Markdown report that adapts to any response structure.
 
@@ -1272,8 +1695,28 @@ def _build_adaptive_report(message: str, result: dict, skill_name: str | None = 
     # Extract main data — handle various response wrappers
     data = result
     if isinstance(data, dict):
+        # Handle chat path failures — render data from successful tool call or error info
+        if data.get("_chat_failed"):
+            inner = data.get("result", {})
+            if isinstance(inner, dict) and inner.get("status") == "completed" and "data" in inner:
+                # Tool call succeeded on retry/with defaults — use its data
+                data = inner["data"]
+                tool_name = inner.get("tool", "")
+                lines.append(f"*分析工具: {_humanize_key(tool_name)}*")
+                lines.append("")
+            elif isinstance(inner, dict) and "data" in inner:
+                data = inner["data"]
+            else:
+                # Tool call still failed — produce a graceful message
+                failed_tool = data.get("_chat_error_tool", "")
+                lines.append(f"> 注意：自动分析工具 `{failed_tool}` 未能执行。")
+                lines.append(f"> 以下为系统基础信息摘要。")
+                lines.append("")
+                # Render whatever data we have, excluding internal flags
+                data = {k: v for k, v in data.items()
+                        if not k.startswith("_chat") and k not in ("status",)}
         # Skill endpoint: {success, data, steps_completed, execution_time}
-        if "data" in data and isinstance(data["data"], dict):
+        elif "data" in data and isinstance(data["data"], dict):
             meta_lines = []
             if "steps_completed" in data:
                 meta_lines.append(f"完成步骤: {data['steps_completed']}")
@@ -1297,7 +1740,20 @@ def _build_adaptive_report(message: str, result: dict, skill_name: str | None = 
                 data = inner
 
     if isinstance(data, dict):
-        _render_dict_to_md(data, lines, level=2)
+        # If skill returned a report_markdown, use it directly
+        if "report_markdown" in data and isinstance(data["report_markdown"], str):
+            lines.append(data["report_markdown"])
+            # Also render other data sections (excluding report_markdown itself)
+            other_data = {k: v for k, v in data.items() if k != "report_markdown"}
+            if other_data:
+                lines.append("")
+                lines.append("## 详细数据 Detailed Data")
+                lines.append("")
+                _render_dict_to_md(other_data, lines, level=3)
+        else:
+            # Trim oversized nested data (e.g. ODD scan step_results)
+            data = _trim_large_data(data)
+            _render_dict_to_md(data, lines, level=2)
     elif isinstance(data, str):
         lines.append(data)
     elif isinstance(data, list):
@@ -1434,13 +1890,19 @@ def cmd_report(args: list[str]):
     # ── Route 2: Dynamic skill matching ──
     skill_name = _find_matching_skill(message)
     if skill_name:
+        params = _get_skill_defaults(skill_name)
         result = _post("/api/gateway/skill", {
             "skill_name": skill_name,
-            "params": {},
+            "params": params,
             "role": "operator",
         })
+        # Check both top-level error and nested result.success
         if "error" in result:
-            skill_name = None  # fall through to chat
+            skill_name = None
+        else:
+            inner = result.get("result", {})
+            if isinstance(inner, dict) and inner.get("success") is False:
+                skill_name = None  # skill execution failed
 
     # ── Route 3: Fallback to gateway/chat ──
     if not skill_name:
@@ -1454,6 +1916,17 @@ def cmd_report(args: list[str]):
             "message": message, "role": role, "session_id": "",
             "user_id": user_openid or "", "params": {},
         })
+
+        # Check for chat path tool execution failures
+        chat_inner = result.get("result", {})
+        if isinstance(chat_inner, dict) and chat_inner.get("status") == "failed":
+            failed_tool = chat_inner.get("tool", "unknown")
+            failed_error = chat_inner.get("error", "")
+            _log(f"Chat tool '{failed_tool}' failed: {failed_error[:100]}")
+            # Wrap the error so we still produce a meaningful report
+            result["_chat_failed"] = True
+            result["_chat_error_tool"] = failed_tool
+            result["_chat_error_msg"] = failed_error
 
     if "error" in result:
         print(f"Error: {result['error']}")
