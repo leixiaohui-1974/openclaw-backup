@@ -1055,16 +1055,23 @@ def _parse_sim_params(text: str) -> dict:
 
 _skills_cache: dict = {"skills": None, "expires": 0}
 
-# Keywords that indicate tank simulation (uses the rich /api/report/tank-analysis endpoint)
-_SIM_KEYWORDS = {"仿真", "模拟", "水箱", "水位变化", "阶跃响应", "水动力"}
+# Strong simulation keywords — always indicate tank simulation
+_SIM_STRONG = {"仿真", "模拟", "水位变化", "阶跃响应", "水动力"}
+# "水箱" alone is too broad (e.g. "水箱PID控制器" is control design, not sim).
+# Require "水箱" + a simulation-context word.
+_SIM_CONTEXT = {"初始水位", "时长", "入流", "出流", "水位", "运行", "排水", "充水"}
+# Non-simulation override: if any of these appear, skip simulation route
+_SIM_OVERRIDE = {"控制器", "pid", "mpc", "控制系统", "参数整定", "设计控制"}
 
 
 def _find_matching_skill(message: str) -> str | None:
     """Dynamically match message to a HydroMAS skill via trigger phrases.
 
     Queries /api/gateway/skills to get available skills and their trigger phrases,
-    then scores each skill by how many trigger phrases appear in the message.
-    Returns the best-matching skill name, or None if no match.
+    then uses a two-level scoring strategy:
+      - Exact phrase match in message: 3 points per match
+      - Individual word match (for multi-word triggers): 1 point per word
+    Tie-breaking: earliest match position in message wins (primary intent first).
     """
     now = _time.time()
     if _skills_cache["skills"] is None or now > _skills_cache["expires"]:
@@ -1076,13 +1083,35 @@ def _find_matching_skill(message: str) -> str | None:
     msg_lower = message.lower()
     best_match = None
     best_score = 0
+    best_pos = len(msg_lower)  # position of earliest trigger match (lower = better)
 
     for skill in skills:
         triggers = skill.get("trigger_phrases", [])
-        score = sum(1 for t in triggers if t.lower() in msg_lower)
-        if score > best_score:
+        score = 0
+        earliest_pos = len(msg_lower)
+
+        for t in triggers:
+            t_lower = t.lower()
+            pos = msg_lower.find(t_lower)
+            if pos >= 0:
+                # Exact phrase match: 3 points
+                score += 3
+                earliest_pos = min(earliest_pos, pos)
+            else:
+                # Word-level match: check if all words in trigger appear in message
+                words = [w for w in re.split(r'[\s\-_]+', t_lower) if len(w) >= 2]
+                if words and all(w in msg_lower for w in words):
+                    score += 1
+                    for w in words:
+                        p = msg_lower.find(w)
+                        if p >= 0:
+                            earliest_pos = min(earliest_pos, p)
+
+        if score > best_score or (score == best_score and score > 0
+                                  and earliest_pos < best_pos):
             best_score = score
             best_match = skill.get("name")
+            best_pos = earliest_pos
 
     return best_match if best_score > 0 else None
 
@@ -1092,9 +1121,19 @@ def _is_simulation_request(message: str) -> bool:
 
     Tank simulation uses the rich /api/report/tank-analysis endpoint which
     produces structured data with simulation arrays, ODD checks, and insights.
+    Avoids false positives like "水箱PID控制器" (control design, not simulation).
     """
     msg_lower = message.lower()
-    return any(kw in msg_lower for kw in _SIM_KEYWORDS)
+    # Override: control/design keywords mean it's NOT a simulation
+    if any(kw in msg_lower for kw in _SIM_OVERRIDE):
+        return False
+    # Strong sim keywords always match
+    if any(kw in msg_lower for kw in _SIM_STRONG):
+        return True
+    # "水箱" needs context (e.g. "水箱仿真" yes, "水箱控制器" no)
+    if "水箱" in msg_lower:
+        return any(ctx in msg_lower for ctx in _SIM_CONTEXT)
+    return False
 
 
 def _humanize_key(key: str) -> str:
@@ -1504,7 +1543,10 @@ def _load_report_history(user_id: str | None = None,
             line = line.strip()
             if not line:
                 continue
-            rec = json.loads(line)
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
             if user_id and rec.get("user_id") != user_id:
                 continue
             records.append(rec)
