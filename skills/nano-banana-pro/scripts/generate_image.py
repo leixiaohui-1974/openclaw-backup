@@ -14,16 +14,74 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
 
 
+def _read_key_from_dotenv() -> str | None:
+    env_path = Path.home() / ".openclaw" / ".env"
+    if not env_path.exists():
+        return None
+    try:
+        for raw in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            key = k.strip()
+            val = v.strip()
+            if key in ("GEMINI_API_KEY", "NANO_BANANA_API_KEY") and val:
+                return val
+    except Exception:
+        return None
+    return None
+
+
+def _read_key_from_openclaw_config() -> str | None:
+    cfg_path = Path(os.environ.get("OPENCLAW_CONFIG_PATH", str(Path.home() / ".openclaw" / "openclaw.json")))
+    if not cfg_path.exists():
+        return None
+    try:
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+    # 1) Skill-scoped overrides
+    skill_cfg = (cfg.get("skills") or {}).get("nano-banana-pro") or {}
+    if isinstance(skill_cfg.get("apiKey"), str) and skill_cfg.get("apiKey"):
+        return skill_cfg["apiKey"]
+    skill_env = skill_cfg.get("env") or {}
+    if isinstance(skill_env.get("GEMINI_API_KEY"), str) and skill_env.get("GEMINI_API_KEY"):
+        return skill_env["GEMINI_API_KEY"]
+
+    # 2) Global env block in openclaw.json
+    env_cfg = cfg.get("env") or {}
+    if isinstance(env_cfg.get("GEMINI_API_KEY"), str) and env_cfg.get("GEMINI_API_KEY"):
+        return env_cfg["GEMINI_API_KEY"]
+    if isinstance(env_cfg.get("NANO_BANANA_API_KEY"), str) and env_cfg.get("NANO_BANANA_API_KEY"):
+        return env_cfg["NANO_BANANA_API_KEY"]
+
+    # 3) Model provider key fallback
+    gemini_provider = (((cfg.get("models") or {}).get("providers") or {}).get("gemini") or {})
+    if isinstance(gemini_provider.get("apiKey"), str) and gemini_provider.get("apiKey"):
+        return gemini_provider["apiKey"]
+    return None
+
+
 def get_api_key(provided_key: str | None) -> str | None:
-    """Get API key from argument first, then environment."""
+    """Resolve API key from cli arg, env, ~/.openclaw/.env, then openclaw.json."""
     if provided_key:
         return provided_key
-    return os.environ.get("GEMINI_API_KEY")
+    if os.environ.get("GEMINI_API_KEY"):
+        return os.environ.get("GEMINI_API_KEY")
+    if os.environ.get("NANO_BANANA_API_KEY"):
+        return os.environ.get("NANO_BANANA_API_KEY")
+    dotenv_key = _read_key_from_dotenv()
+    if dotenv_key:
+        return dotenv_key
+    return _read_key_from_openclaw_config()
 
 
 def main():

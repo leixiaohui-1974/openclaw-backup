@@ -13,7 +13,9 @@ Feishu Document Image Pipeline
 
 import argparse
 import json
+import mimetypes
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -22,6 +24,7 @@ import requests
 # ── Feishu API ──────────────────────────────────────────────
 
 FEISHU_BASE = "https://open.feishu.cn/open-apis"
+DEFAULT_OUTPUT_DIR = os.path.expanduser("~/.openclaw/workspace/workspace/.openclaw/feishu-images")
 
 
 def feishu_get_token(app_id, app_secret):
@@ -66,6 +69,9 @@ def feishu_create_image_block(token, doc_token, index=-1):
 
 def feishu_upload_image(token, block_id, image_path):
     """上传图片到飞书"""
+    mime_type, _ = mimetypes.guess_type(image_path)
+    if not mime_type:
+        mime_type = "application/octet-stream"
     with open(image_path, "rb") as f:
         resp = requests.post(
             f"{FEISHU_BASE}/drive/v1/medias/upload_all",
@@ -76,7 +82,7 @@ def feishu_upload_image(token, block_id, image_path):
                 "parent_node": block_id,
                 "size": str(os.path.getsize(image_path)),
             },
-            files={"file": (os.path.basename(image_path), f, "image/png")},
+            files={"file": (os.path.basename(image_path), f, mime_type)},
         )
     data = resp.json()
     if data.get("code") != 0:
@@ -97,20 +103,151 @@ def feishu_patch_image(token, doc_token, block_id, file_token):
 
 
 def feishu_delete_block(token, doc_token, block_id):
-    """删除文档中的一个块"""
-    resp = requests.delete(
-        f"{FEISHU_BASE}/docx/v1/documents/{doc_token}/blocks/{block_id}",
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    # 飞书 delete 接口可能返回非标准 JSON
+    """删除文档中的一个顶层块（通过 children/batch_delete）"""
+    children = feishu_get_children(token, doc_token)
     try:
-        data = resp.json()
-        return data.get("code", -1) == 0
-    except Exception:
-        return resp.status_code in (200, 204)
+        idx = children.index(block_id)
+    except ValueError:
+        return False
+
+    resp = requests.delete(
+        f"{FEISHU_BASE}/docx/v1/documents/{doc_token}/blocks/{doc_token}/children/batch_delete",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        json={"start_index": idx, "end_index": idx + 1},
+    )
+    data = resp.json()
+    return data.get("code", -1) == 0
 
 
 # ── Image Generation (nano-banana-pro) ──────────────────────
+
+CHINESE_TEXT_RULE = (
+    "All visible text in the image must be in Simplified Chinese only. "
+    "Do not use English words, letters, or romanization in labels."
+)
+
+
+def load_api_key_from_openclaw_env() -> str:
+    """从 ~/.openclaw/.env 读取 Gemini/Nano API Key。"""
+    env_path = os.path.expanduser("~/.openclaw/.env")
+    if not os.path.exists(env_path):
+        return ""
+
+    wanted = ("GEMINI_API_KEY", "NANO_BANANA_API_KEY")
+    values = {}
+    try:
+        with open(env_path, "r", encoding="utf-8") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                values[k.strip()] = v.strip()
+    except Exception:
+        return ""
+
+    for key in wanted:
+        val = values.get(key, "")
+        if val:
+            return val
+    return ""
+
+
+def load_api_key_from_openclaw_config() -> str:
+    """从 openclaw.json 读取 Gemini/Nano API Key。"""
+    cfg_path = os.environ.get("OPENCLAW_CONFIG_PATH", os.path.expanduser("~/.openclaw/openclaw.json"))
+    if not os.path.exists(cfg_path):
+        return ""
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    except Exception:
+        return ""
+
+    # 1) skills.nano-banana-pro.*
+    skills = cfg.get("skills") or {}
+    nano = skills.get("nano-banana-pro") or {}
+    if isinstance(nano.get("apiKey"), str) and nano.get("apiKey"):
+        return nano["apiKey"]
+    nano_env = nano.get("env") or {}
+    if isinstance(nano_env.get("GEMINI_API_KEY"), str) and nano_env.get("GEMINI_API_KEY"):
+        return nano_env["GEMINI_API_KEY"]
+
+    # 2) top-level env
+    env_cfg = cfg.get("env") or {}
+    for key in ("GEMINI_API_KEY", "NANO_BANANA_API_KEY"):
+        val = env_cfg.get(key)
+        if isinstance(val, str) and val:
+            return val
+
+    # 3) models.providers.gemini.apiKey
+    providers = ((cfg.get("models") or {}).get("providers") or {})
+    gemini = providers.get("gemini") or {}
+    if isinstance(gemini.get("apiKey"), str) and gemini.get("apiKey"):
+        return gemini["apiKey"]
+    return ""
+
+
+def _mask_secret(value: str) -> str:
+    if not value:
+        return "(empty)"
+    if len(value) <= 10:
+        return "*" * len(value)
+    return f"{value[:6]}...{value[-4:]}"
+
+
+def _classify_generate_error(msg: str) -> str:
+    s = (msg or "").lower()
+    if "no api key provided" in s or "gemini_api_key" in s:
+        return "missing_api_key"
+    if "找不到 nano-banana-pro" in s or "generate_image.py" in s:
+        return "missing_script"
+    if "no such file or directory" in s and "uv" in s:
+        return "missing_uv"
+    if "timeout" in s:
+        return "timeout"
+    if "403" in s or "permission" in s or "unauthorized" in s:
+        return "auth_or_permission"
+    if "quota" in s or "429" in s:
+        return "quota_or_rate_limit"
+    return "unknown"
+
+
+def _preflight_generation(skip_generate: bool, image_dir: str, images: list, gemini_key: str) -> dict:
+    """生成前健康检查，避免进入伪执行状态。"""
+    uv_path = shutil.which("uv")
+    script_path = _find_nano_banana_script()
+    key_present = bool(gemini_key)
+    existing_count = 0
+    for img in images:
+        fp = os.path.join(image_dir, img.get("filename", ""))
+        if fp and os.path.exists(fp):
+            existing_count += 1
+
+    result = {
+        "skip_generate": bool(skip_generate),
+        "uv_path": uv_path or "",
+        "script_path": script_path or "",
+        "key_present": key_present,
+        "existing_count": existing_count,
+        "total_images": len(images),
+    }
+    return result
+
+
+def ensure_chinese_text_prompt(prompt: str, force_chinese_text: bool = True) -> str:
+    """确保图中文字约束为中文。"""
+    prompt = (prompt or "").strip()
+    if not force_chinese_text:
+        return prompt
+
+    lower = prompt.lower()
+    if "all visible text in the image must be in simplified chinese only" in lower:
+        return prompt
+    if not prompt:
+        return CHINESE_TEXT_RULE
+    return f"{prompt}\n\n{CHINESE_TEXT_RULE}"
+
 
 def generate_image(prompt, output_path, resolution="2K", gemini_api_key=None):
     """用 nano-banana-pro (Gemini 3 Pro Image) 生成图片"""
@@ -154,14 +291,25 @@ def generate_image(prompt, output_path, resolution="2K", gemini_api_key=None):
 def _find_nano_banana_script():
     """查找 nano-banana-pro 的生成脚本"""
     import glob
+    candidates = [
+        os.path.expanduser("~/.openclaw/workspace/skills/nano-banana-pro/scripts/generate_image.py"),
+        os.path.expanduser("~/.codex/skills/nano-banana-pro/scripts/generate_image.py"),
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+
     patterns = [
-        os.path.expanduser("~/.local/share/pnpm/global/*/.*openclaw*/node_modules/openclaw/skills/nano-banana-pro/scripts/generate_image.py"),
+        os.path.expanduser("~/.local/share/pnpm/global/*/.pnpm/openclaw@*/node_modules/openclaw/skills/nano-banana-pro/scripts/generate_image.py"),
+        os.path.expanduser("~/.local/share/pnpm/global/*/node_modules/openclaw/skills/nano-banana-pro/scripts/generate_image.py"),
         "/home/admin/.local/share/pnpm/global/5/.pnpm/openclaw@*/node_modules/openclaw/skills/nano-banana-pro/scripts/generate_image.py",
     ]
+    all_matches = []
     for pat in patterns:
-        matches = glob.glob(pat)
-        if matches:
-            return matches[0]
+        all_matches.extend(glob.glob(pat))
+    if all_matches:
+        all_matches.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        return all_matches[0]
     return None
 
 
@@ -173,10 +321,20 @@ def run_pipeline(config):
     feishu = config["feishu"]
     doc_token = config["doc_token"]
     images = config["images"]
-    image_dir = config.get("output_dir", "/tmp/feishu-pipeline-images")
+    image_dir = config.get("output_dir", DEFAULT_OUTPUT_DIR)
     resolution = config.get("resolution", "2K")
-    gemini_key = config.get("gemini_api_key", os.environ.get("GEMINI_API_KEY", ""))
+    gemini_key = (
+        config.get("gemini_api_key")
+        or config.get("api_key")
+        or config.get("nano_api_key")
+        or os.environ.get("GEMINI_API_KEY", "")
+        or os.environ.get("NANO_BANANA_API_KEY", "")
+        or load_api_key_from_openclaw_env()
+        or load_api_key_from_openclaw_config()
+    )
+    force_chinese_text = config.get("force_chinese_text", True)
     skip_generate = config.get("skip_generate", False)
+    auto_degrade = config.get("degrade_to_existing_images_on_generate_failure", True)
 
     os.makedirs(image_dir, exist_ok=True)
 
@@ -188,6 +346,29 @@ def run_pipeline(config):
     print(f"分辨率: {resolution}")
     print(f"输出目录: {image_dir}")
     print(f"跳过生成: {skip_generate}")
+    print(f"强制中文文案: {force_chinese_text}")
+
+    preflight = _preflight_generation(skip_generate, image_dir, images, gemini_key)
+    print(
+        "生成预检:"
+        f" uv={'OK' if preflight['uv_path'] else 'MISSING'}"
+        f", script={'OK' if preflight['script_path'] else 'MISSING'}"
+        f", key={'OK' if preflight['key_present'] else 'MISSING'}"
+        f", existing={preflight['existing_count']}/{preflight['total_images']}"
+    )
+    if preflight["key_present"]:
+        print(f"  API key: {_mask_secret(gemini_key)}")
+
+    generation_ready = bool(preflight["uv_path"] and preflight["script_path"] and preflight["key_present"])
+    if not skip_generate and not generation_ready:
+        if auto_degrade and preflight["existing_count"] > 0:
+            print("  !! 生成链路不可用，自动降级：跳过生成，仅使用已有图片继续插入")
+            skip_generate = True
+        else:
+            raise Exception(
+                "生成预检失败：缺少 uv/脚本/API key，且无可用已有图片可降级。"
+                "请检查 uv、nano-banana-pro 脚本路径和 GEMINI_API_KEY。"
+            )
 
     # Step 1: 获取飞书 token
     print("\n[1/4] 获取飞书访问令牌...")
@@ -207,10 +388,16 @@ def run_pipeline(config):
 
         print(f"  [{i+1}/{len(images)}] 生成: {img.get('description', filename)}")
         try:
-            generate_image(img["prompt"], filepath, resolution, gemini_key)
+            prompt = ensure_chinese_text_prompt(img.get("prompt", ""), force_chinese_text)
+            generate_image(prompt, filepath, resolution, gemini_key)
         except Exception as e:
             print(f"    !! 失败: {e}")
             img["_error"] = str(e)
+            img["_error_type"] = _classify_generate_error(str(e))
+            if auto_degrade and os.path.exists(filepath):
+                print(f"    -> 自动降级: 使用已有文件 {filename}")
+                img["_degraded_to_existing"] = True
+                continue
             continue
 
         time.sleep(1)  # 避免 API 限流
@@ -296,9 +483,11 @@ def generate_sample_config():
         },
         "doc_token": "Hk4md9l25ojaaMxtK6tcumWonRc",
         "gemini_api_key": "YOUR_GEMINI_API_KEY",
-        "output_dir": "/home/admin/workspace/workspace/articles/images-new",
+        "force_chinese_text": True,
+        "output_dir": DEFAULT_OUTPUT_DIR,
         "resolution": "2K",
         "skip_generate": False,
+        "degrade_to_existing_images_on_generate_failure": True,
         "images": [
             {
                 "filename": "001-web-browser-vs-cli.png",

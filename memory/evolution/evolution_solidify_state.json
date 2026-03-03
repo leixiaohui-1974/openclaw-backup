@@ -1,0 +1,148 @@
+{
+  "last_run": {
+    "run_id": "run_1772348403505",
+    "created_at": "2026-03-01T07:00:03.525Z",
+    "parent_event_id": "evt_1770478341769",
+    "selected_gene_id": null,
+    "selected_capsule_id": null,
+    "selector": {
+      "selected": null,
+      "reason": [
+        "no matching gene found; new gene may be required",
+        "signals: repeated_tool_usage:exec",
+        "memory_graph: memory_prefer:gene_gep_repair_from_errors | memory_ban:gene_gep_repair_from_errors | gene_prior:0.095",
+        "drift_intensity: 0.408"
+      ],
+      "alternatives": []
+    },
+    "signals": [
+      "repeated_tool_usage:exec"
+    ],
+    "mutation": {
+      "type": "Mutation",
+      "id": "mut_1772348403491",
+      "category": "innovate",
+      "trigger_signals": [
+        "repeated_tool_usage:exec"
+      ],
+      "target": "behavior:protocol",
+      "expected_effect": "explore new strategy combinations to escape local optimum",
+      "risk_level": "medium"
+    },
+    "mutation_id": "mut_1772348403491",
+    "personality_state": {
+      "type": "PersonalityState",
+      "rigor": 0.7,
+      "creativity": 0.35,
+      "verbosity": 0.25,
+      "risk_tolerance": 0.4,
+      "obedience": 0.85
+    },
+    "personality_key": "rigor=0.7|creativity=0.3|verbosity=0.3|risk_tolerance=0.4|obedience=0.9",
+    "personality_known": false,
+    "personality_mutations": [],
+    "drift": false,
+    "selected_by": "memory_graph+selector",
+    "source_type": "generated",
+    "reused_asset_id": null,
+    "reused_source_node": null,
+    "reused_chain_id": null,
+    "baseline_untracked": [
+      "assets/gep/failed_capsules.json",
+      "assets/gep/genes.jsonl",
+      "evolver.pid",
+      "package-lock.json"
+    ],
+    "baseline_git_head": "1b46e8dc53db63cda79d4f063f058538ede2fe84",
+    "blast_radius_estimate": {
+      "files": 12,
+      "lines": 960
+    },
+    "active_task_id": null,
+    "active_task_title": null,
+    "applied_lessons": [
+      "cmm74u8bz2y8jll351pzulkf4",
+      "cmm75284l2zzqll33fqeo9vxz",
+      "cmm75a66u314xll35ldtr7dra",
+      "cmm75h1y032v0ll334vq06ttg",
+      "cmm75q5i138dwll34kl6xvuj7",
+      "cmm76z4re3bn0ll3370bymtlh"
+    ],
+    "hub_lessons": [
+      {
+        "lesson_id": "cmm74u8bz2y8jll351pzulkf4",
+        "lesson_type": "positive",
+        "scenario": "success",
+        "signals": [
+          "b22_smart_home"
+        ],
+        "content": "When an 'innovate' intent is active and initial attempts with conventional strategies yield suboptimal or",
+        "effectiveness": 1,
+        "source_node_id": "node_2c3f61b93fb2d899"
+      },
+      {
+        "lesson_id": "cmm75284l2zzqll33fqeo9vxz",
+        "lesson_type": "positive",
+        "scenario": "success",
+        "signals": [
+          "b22_energy_saver"
+        ],
+        "content": "Success in an \"innovate\" scenario often stems from deliberately challenging conventional wisdom and exploring unconventional solution spaces.",
+        "effectiveness": 1,
+        "source_node_id": "node_2c3f61b93fb2d899"
+      },
+      {
+        "lesson_id": "cmm75a66u314xll35ldtr7dra",
+        "lesson_type": "positive",
+        "scenario": "success",
+        "signals": [
+          "b22_garden_helper"
+        ],
+        "content": "This success in innovation stemmed from a willingness to diverge from established patterns, likely by exploring novel combinations",
+        "effectiveness": 1,
+        "source_node_id": "node_2c3f61b93fb2d899"
+      },
+      {
+        "lesson_id": "cmm75h1y032v0ll334vq06ttg",
+        "lesson_type": "positive",
+        "scenario": "success",
+        "signals": [
+          "error_pattern",
+          "retry_failed",
+          "connection_lost",
+          "timeout_error"
+        ],
+        "content": "When facing a \"repair\" intent, this approach succeeded because the agent effectively matched a detected deviation or",
+        "effectiveness": 0.96,
+        "source_node_id": "node_acf4d7d260e6"
+      },
+      {
+        "lesson_id": "cmm75q5i138dwll34kl6xvuj7",
+        "lesson_type": "positive",
+        "scenario": "success",
+        "signals": [
+          "CircuitBreakerOpen",
+          "ServiceUnavailable",
+          "CascadeFailure"
+        ],
+        "content": "When facing a `repair` intent, success often stems from precisely identifying the specific deviation or error pattern that",
+        "effectiveness": 0.91,
+        "source_node_id": "node_5c5069f62a680797"
+      },
+      {
+        "lesson_id": "cmm76z4re3bn0ll3370bymtlh",
+        "lesson_type": "positive",
+        "scenario": "success",
+        "signals": [
+          "real_time_communication",
+          "bidirectional_messaging",
+          "event_driven_architecture",
+          "low_latency_updates"
+        ],
+        "content": "When the intent is `innovate` and a high-scoring success is achieved, it indicates that the",
+        "effectiveness": 0.97,
+        "source_node_id": "node_5de6576ae682d81eb8b9cb36d0e92892"
+      }
+    ]
+  }
+}
