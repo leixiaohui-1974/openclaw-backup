@@ -8,6 +8,9 @@
     python3 hydromas_call.py sim [duration] [--initial_h 0.5] [--title "..."]
     python3 hydromas_call.py api <skill_name> ['{"param":"value"}']
     python3 hydromas_call.py api list
+    python3 hydromas_call.py book-kb sync --github-url "https://github.com/<owner>/<repo>/tree/<branch>/<dir>" [--user-openid ID] [--no-feishu]
+    python3 hydromas_call.py book-kb sync-api-docs [--user-openid ID] [--no-feishu]
+    python3 hydromas_call.py book-kb query "四预闭环" [--top-k 5]
     python3 hydromas_call.py skills [--role operator]
     python3 hydromas_call.py health
     python3 hydromas_call.py roles
@@ -16,6 +19,7 @@
 
 report 命令 = chat + 自动生成飞书文档（含表格+图表），返回文档链接。
 api 命令 = 直接调用任意 HydroMAS API 端点，所有参数均有默认值。
+book-kb 命令 = GitHub 书稿/API 文档同步为本地知识库，并支持查询与飞书发布。
 evolve 命令 = EvoMap GEP演化管理，支持单次运行/状态查看/固化/守护进程。
 --user-openid: 指定请求用户的飞书 open_id，文档将授权给该用户 + 管理员。
 
@@ -4718,6 +4722,18 @@ def cmd_api(args: list[str]):
         print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
+def cmd_book_kb(args: list[str]):
+    """Delegate knowledge-base sync/query to book_kb.py."""
+    script = pathlib.Path(_SCRIPT_DIR) / "book_kb.py"
+    if not script.exists():
+        print(f"book_kb script not found: {script}", file=sys.stderr)
+        sys.exit(2)
+
+    proc = subprocess.run([sys.executable, str(script)] + list(args))
+    if proc.returncode != 0:
+        sys.exit(proc.returncode)
+
+
 def _collect_report_images(case_id: str, role: str) -> list[dict]:
     """Collect pre-generated concept and flow diagram images for this role×case."""
     images = []
@@ -5013,6 +5029,8 @@ def main():
         "history": cmd_history,
         "evolve": cmd_evolve,
         "api": cmd_api,
+        "book-kb": cmd_book_kb,
+        "kb": cmd_book_kb,
     }
 
     if cmd in commands:
