@@ -215,15 +215,97 @@ def select_latest_chapter_files(paths: list[str], include_extra: bool = False) -
     return selected
 
 
+def _strip_md_comments(text: str) -> str:
+    return re.sub(r"<!--.*?-->", "", text, flags=re.S).strip()
+
+
+def _chapter_label_from_path(path: str) -> str:
+    m = re.match(r"^ch(\d{2})_", pathlib.Path(path).name.lower())
+    return f"第{int(m.group(1)):02d}章" if m else pathlib.Path(path).stem
+
+
+def _extract_h1_title(text: str, fallback: str) -> str:
+    t = _strip_md_comments(text)
+    for ln in t.splitlines():
+        s = ln.strip()
+        if s.startswith("# "):
+            return s[2:].strip()
+    return fallback
+
+
+def _summarize_markdown(text: str, limit: int = 180) -> str:
+    t = _strip_md_comments(text)
+    t = re.sub(r"(^|\n)\s{0,3}#{1,6}\s*", "\n", t)
+    t = re.sub(r"(^|\n)\s*[-*+]\s+", "\n", t)
+    t = re.sub(r"(^|\n)\s*\d+\.\s+", "\n", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    parts = [p.strip() for p in re.split(r"(?<=[。！？.!?])\s+", t) if p.strip()]
+    out: list[str] = []
+    size = 0
+    for s in parts:
+        if len(s) < 12:
+            continue
+        if size + len(s) > limit:
+            break
+        out.append(s)
+        size += len(s)
+        if len(out) >= 2:
+            break
+    return " ".join(out) if out else t[:limit]
+
+
+def _chapter_body_without_h1(text: str) -> str:
+    t = _strip_md_comments(text)
+    lines = t.splitlines()
+    out: list[str] = []
+    skipped_h1 = False
+    for ln in lines:
+        s = ln.strip()
+        if not skipped_h1 and s.startswith("# "):
+            skipped_h1 = True
+            continue
+        out.append(ln)
+    return "\n".join(out).strip()
+
+
+def parse_chapter_info(path: str, content: str) -> dict[str, str]:
+    return {
+        "path": path,
+        "label": _chapter_label_from_path(path),
+        "title": _extract_h1_title(content, pathlib.Path(path).name),
+        "summary": _summarize_markdown(content, limit=180),
+        "raw_content": content,
+        "body": _chapter_body_without_h1(content),
+    }
+
+
 def compose_book_markdown(book: str, file_contents: list[tuple[str, str]]) -> str:
-    lines = [f"# {book}", "", f"> 来源: 自动从 GitHub 同步", ""]
-    for path, content in file_contents:
-        lines.append(f"## 文件: {path}")
+    book_title = BOOK_TITLES.get(book, book)
+    chapters = [parse_chapter_info(path, content) for path, content in file_contents]
+
+    lines = [
+        f"# {book_title}",
+        "",
+        "> 版本：仅最新章节",
+        f"> 章节数：{len(chapters)}",
+        "",
+        "## 目录",
+        "",
+    ]
+    for ch in chapters:
+        lines.append(f"- {ch['label']} · {ch['title']}")
+
+    lines += ["", "---", ""]
+    for ch in chapters:
+        lines.append(f"## {ch['label']} · {ch['title']}")
         lines.append("")
-        lines.append(content.strip())
+        lines.append(f"**章节导读**：{ch['summary']}")
+        lines.append("")
+        lines.append(ch["body"])
         lines.append("")
         lines.append("---")
         lines.append("")
+
     return "\n".join(lines).strip() + "\n"
 
 
@@ -245,6 +327,33 @@ def compose_book_markdown_index(
         t = "\n".join(lines)
         return re.sub(r"\s+", " ", t).strip()
 
+    def _summarize_preview(text: str, limit: int) -> str:
+        t = _clean_preview(text)
+        # Remove markdown headings and list markers for summary extraction.
+        t = re.sub(r"(^|\\n)\\s{0,3}#{1,6}\\s*", "\\n", t)
+        t = re.sub(r"(^|\\n)\\s*[-*+]\\s+", "\\n", t)
+        t = re.sub(r"(^|\\n)\\s*\\d+\\.\\s+", "\\n", t)
+        t = re.sub(r"\\s+", " ", t).strip()
+        if not t:
+            return ""
+
+        # Pick first 1-2 meaningful sentences instead of raw truncation.
+        parts = [p.strip() for p in re.split(r"(?<=[。！？.!?])\\s+", t) if p.strip()]
+        picked = []
+        size = 0
+        for s in parts:
+            if len(s) < 12:
+                continue
+            if size + len(s) > limit:
+                break
+            picked.append(s)
+            size += len(s)
+            if len(picked) >= 2:
+                break
+        if picked:
+            return " ".join(picked)
+        return t[:limit]
+
     def _extract_heading(text: str) -> str:
         t = re.sub(r"<!--.*?-->", " ", text, flags=re.S)
         for ln in t.splitlines():
@@ -263,29 +372,70 @@ def compose_book_markdown_index(
     lines = [
         f"# {book_title}",
         "",
-        "> 发布模式: index（高效率）",
+        "> 发布模式: index（飞书内链版）",
         f"> 文件数: {len(file_contents)}",
         "",
         "## 目录",
         "",
-        "| 章节 | 标题 | 原文 |",
-        "|---|---|---|",
     ]
     for path, content in file_contents:
-        raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}"
         heading = _extract_heading(content) or pathlib.Path(path).name
-        lines.append(f"| {_chapter_label(path)} | {heading} | [链接]({raw_url}) |")
+        lines.append(f"- {_chapter_label(path)} · {heading}")
+        lines.append("  - 阅读方式：本页查看章节摘要，详细内容以飞书文档正文为准")
 
     lines += ["", "---", ""]
     for path, content in file_contents:
-        raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}"
-        preview = _clean_preview(content)[:preview_chars]
+        preview = _summarize_preview(content, preview_chars)
         lines.append(f"## {_chapter_label(path)} · {(_extract_heading(content) or pathlib.Path(path).name)}")
         lines.append("")
-        lines.append(f"- 原文: {raw_url}")
         if preview:
-            lines.append(f"- 预览: {preview}")
+            lines.append(f"- 摘要: {preview}")
         lines.append("")
+    return "\n".join(lines).strip() + "\n"
+
+
+def compose_book_markdown_split_index(
+    book: str,
+    owner: str,
+    repo: str,
+    branch: str,
+    chapters: list[dict[str, str]],
+    chapter_urls: dict[str, str],
+) -> str:
+    book_title = BOOK_TITLES.get(book, book)
+
+    lines = [
+        f"# {book_title}",
+        "",
+        "## 阅读导航",
+        "",
+        "- 发布结构：总目录 + 章节文档",
+        "- 当前版本：仅保留每章最新稿（`*_final.md` 优先）",
+        f"- 章节总数：{len(chapters)}",
+        "",
+        "## 章节清单",
+        "",
+    ]
+
+    for idx, ch in enumerate(chapters, start=1):
+        raw = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{ch['path']}"
+        feishu_url = chapter_urls.get(ch["path"], "")
+        lines.append(f"### {idx:02d}. {ch['label']} · {ch['title']}")
+        lines.append("")
+        lines.append(f"- 摘要：{ch['summary']}")
+        lines.append(f"- 飞书正文：{feishu_url if feishu_url else '发布失败'}")
+        lines.append(f"- GitHub原文：{raw}")
+        lines.append("")
+
+    lines.extend(
+        [
+            "## 使用说明",
+            "",
+            "- 点击每章“飞书正文”链接进入章节完整内容。",
+            "- 本页作为总入口，正文更新按章节独立进行。",
+            "",
+        ]
+    )
     return "\n".join(lines).strip() + "\n"
 
 
@@ -507,6 +657,7 @@ def run_sync(args: argparse.Namespace) -> int:
     groups = group_by_book(base_path, files)
     books_full: dict[str, str] = {}
     books_publish: dict[str, str] = {}
+    books_chapters: dict[str, list[dict[str, str]]] = {}
     published: dict[str, str] = {}
     mode = str(getattr(args, "publish_mode", "index")).strip().lower()
 
@@ -524,6 +675,8 @@ def run_sync(args: argparse.Namespace) -> int:
                 p = fut_map[fut]
                 contents_map[p] = fut.result()
         contents = [(p, contents_map[p]) for p in paths if p in contents_map]
+        chapter_infos = [parse_chapter_info(p, c) for p, c in contents]
+        books_chapters[book] = chapter_infos
         full_text = compose_book_markdown(book, contents)
         books_full[book] = full_text
 
@@ -531,7 +684,7 @@ def run_sync(args: argparse.Namespace) -> int:
             books_publish[book] = compose_book_markdown_index(
                 book, owner, repo, branch, contents, preview_chars=int(getattr(args, "preview_chars", 320))
             )
-        else:
+        elif mode == "full":
             books_publish[book] = full_text
 
     b_count, c_count = rebuild_kb_index(args.github_url, books_full)
@@ -543,17 +696,12 @@ def run_sync(args: argparse.Namespace) -> int:
             app_secret=conf["FEISHU_APP_SECRET"],
             doc_domain=conf["FEISHU_DOC_DOMAIN"] or "docs.feishu.cn",
         )
-        for book, text in books_publish.items():
-            book_title = BOOK_TITLES.get(book, book)
-            if mode == "index":
-                title = f"{book_title}（最新章节索引）"
-            else:
-                title = f"{book_title}（最新章节）"
-            doc_id, url = pub.create_doc(title)
-            block_count = 0
-            if FEISHU_DOC_PUBLISHER.exists() and mode == "full":
+        def _write_doc(book_key: str, doc_id: str, text: str, publish_mode: str, timeout_s: int) -> int:
+            if publish_mode == "split":
+                return pub.write_markdown_like(doc_id, text)
+            if FEISHU_DOC_PUBLISHER.exists():
                 with tempfile.TemporaryDirectory(prefix="bookkb-") as td:
-                    md_file = pathlib.Path(td) / f"{book}.md"
+                    md_file = pathlib.Path(td) / f"{book_key}.md"
                     cfg_file = pathlib.Path(td) / "cfg.json"
                     md_file.write_text(text, encoding="utf-8")
                     cfg = {
@@ -569,25 +717,66 @@ def run_sync(args: argparse.Namespace) -> int:
                         cfg["user_openid"] = args.user_openid
                     cfg_file.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
                     try:
-                        proc = subprocess.run(
-                            [sys.executable, str(FEISHU_DOC_PUBLISHER), str(cfg_file)],
-                            timeout=240,
-                        )
+                        proc = subprocess.run([sys.executable, str(FEISHU_DOC_PUBLISHER), str(cfg_file)], timeout=timeout_s)
                     except subprocess.TimeoutExpired:
                         proc = None
                     if proc is None or proc.returncode != 0:
-                        block_count = pub.write_markdown_like(doc_id, text)
+                        return pub.write_markdown_like(doc_id, text)
+                    return -1
+            return pub.write_markdown_like(doc_id, text)
+
+        if mode == "split":
+            for book, chapters in books_chapters.items():
+                book_title = BOOK_TITLES.get(book, book)
+                chapter_urls: dict[str, str] = {}
+                for i, ch in enumerate(chapters, start=1):
+                    chapter_doc_title = f"{book_title}·{ch['label']} {ch['title']}"
+                    doc_id, url = pub.create_doc(chapter_doc_title)
+                    chapter_md = (
+                        f"# {ch['label']} · {ch['title']}\n\n"
+                        "## 章节导读\n\n"
+                        f"- 核心摘要：{ch['summary']}\n"
+                        f"- 原文地址：https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{ch['path']}\n\n"
+                        "## 正文\n\n"
+                        f"{ch['body']}\n"
+                    )
+                    block_count = _write_doc(f"{book}-chapter-{i:02d}", doc_id, chapter_md, "split", timeout_s=300)
+                    if args.user_openid:
+                        pub.grant(doc_id, args.user_openid)
+                    chapter_urls[ch["path"]] = url
+                    if block_count >= 0:
+                        print(f"[feishu] {book} {ch['label']}: {url} (blocks={block_count})")
                     else:
-                        block_count = -1
-            else:
-                block_count = pub.write_markdown_like(doc_id, text)
-            if args.user_openid:
-                pub.grant(doc_id, args.user_openid)
-            published[book] = url
-            if block_count >= 0:
-                print(f"[feishu] {book}: {url} (blocks={block_count})")
-            else:
-                print(f"[feishu] {book}: {url} (typeset=feishu-doc-publisher)")
+                        print(f"[feishu] {book} {ch['label']}: {url} (typeset=feishu-doc-publisher)")
+
+                index_md = compose_book_markdown_split_index(book, owner, repo, branch, chapters, chapter_urls)
+                index_doc_id, index_url = pub.create_doc(f"{book_title}（总目录）")
+                index_blocks = _write_doc(f"{book}-index", index_doc_id, index_md, "split", timeout_s=150)
+                if args.user_openid:
+                    pub.grant(index_doc_id, args.user_openid)
+                published[book] = index_url
+                if index_blocks >= 0:
+                    print(f"[feishu] {book} index: {index_url} (blocks={index_blocks})")
+                else:
+                    print(f"[feishu] {book} index: {index_url} (typeset=feishu-doc-publisher)")
+        else:
+            for book, text in books_publish.items():
+                book_title = BOOK_TITLES.get(book, book)
+                if mode == "index":
+                    title = f"{book_title}（最新章节索引）"
+                    timeout_s = 150
+                else:
+                    title = f"{book_title}（最新章节）"
+                    timeout_s = 900
+                doc_id, url = pub.create_doc(title)
+                block_count = _write_doc(book, doc_id, text, mode, timeout_s=timeout_s)
+                if args.user_openid:
+                    pub.grant(doc_id, args.user_openid)
+                published[book] = url
+                if block_count >= 0:
+                    print(f"[feishu] {book}: {url} (blocks={block_count})")
+                else:
+                    print(f"[feishu] {book}: {url} (typeset=feishu-doc-publisher)")
 
     print(f"[kb] source={args.github_url}")
     print(f"[kb] books={b_count} chunks={c_count} index={KB_INDEX_FILE}")
@@ -743,7 +932,12 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--user-openid", default="", help="发布后授予 full_access 的用户 openid")
     ps.add_argument("--no-feishu", action="store_true", help="只建知识库，不发飞书")
     ps.add_argument("--fetch-workers", type=int, default=8, help="并发下载 Markdown 文件的线程数")
-    ps.add_argument("--publish-mode", choices=["full", "index"], default="index", help="飞书发布模式：full=全文，index=目录+预览（更快）")
+    ps.add_argument(
+        "--publish-mode",
+        choices=["full", "index", "split"],
+        default="index",
+        help="飞书发布模式：full=整书正文，index=目录+摘要，split=总目录+章节文档（推荐）",
+    )
     ps.add_argument("--preview-chars", type=int, default=320, help="index 模式每文件预览字符数")
     ps.add_argument("--all-versions", action="store_true", help="保留所有版本文件（默认仅保留每章最新版本）")
     ps.add_argument("--include-extra", action="store_true", help="在 latest-only 模式下保留非章节 markdown")
