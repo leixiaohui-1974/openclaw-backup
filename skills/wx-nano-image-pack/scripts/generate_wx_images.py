@@ -40,7 +40,7 @@ def build_prompt(slot):
     )
 
 
-def run_nano(prompt: str, output_path: Path, resolution: str):
+def run_nano(prompt: str, output_path: Path, resolution: str, model_strategy: str):
     cmd = [
         "uv",
         "run",
@@ -52,6 +52,8 @@ def run_nano(prompt: str, output_path: Path, resolution: str):
         "--resolution",
         resolution,
     ]
+    if model_strategy:
+        cmd.extend(["--model-strategy", model_strategy])
     result = subprocess.run(cmd, capture_output=True, text=True)
     ok = result.returncode == 0 and output_path.exists()
     return ok, result
@@ -62,6 +64,16 @@ def main():
     parser.add_argument("--article", required=True, help="Path to markdown article")
     parser.add_argument("--output-dir", required=True, help="Directory for generated images")
     parser.add_argument("--resolution", default="2K", choices=["1K", "2K", "4K"])
+    parser.add_argument(
+        "--model-strategy",
+        default=os.environ.get("NANO_MODEL_STRATEGY", "banana2,banana3"),
+        help="Image model strategy, e.g. banana2,banana3",
+    )
+    parser.add_argument(
+        "--indices",
+        default="",
+        help="Optional image indices, e.g. 1,3,5. Empty means all slots found in article.",
+    )
     args = parser.parse_args()
 
     article_path = Path(args.article)
@@ -78,10 +90,23 @@ def main():
     slots = parse_image_slots(text)
     if not slots:
         raise SystemExit("No image slots found. Expected lines like: 【配图建议 1：...】")
+    if args.indices.strip():
+        wanted = set()
+        for part in args.indices.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if not part.isdigit():
+                raise SystemExit(f"Invalid --indices value: {args.indices}")
+            wanted.add(int(part))
+        slots = [s for s in slots if s["index"] in wanted]
+        if not slots:
+            raise SystemExit(f"No matching image slots for indices: {args.indices}")
 
     manifest = {
         "article": str(article_path),
         "resolution": args.resolution,
+        "model_strategy": args.model_strategy,
         "nano_script": str(NANO_SCRIPT),
         "images": [],
     }
@@ -94,7 +119,7 @@ def main():
         prompt = build_prompt(slot)
 
         print(f"[{idx}] Generating {filename}")
-        ok, result = run_nano(prompt, output_path, args.resolution)
+        ok, result = run_nano(prompt, output_path, args.resolution, args.model_strategy)
 
         entry = {
             "index": idx,

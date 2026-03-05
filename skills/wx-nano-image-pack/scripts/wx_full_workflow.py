@@ -238,6 +238,17 @@ def main():
     parser.add_argument("--feishu-app-id", default="", help="Feishu app id override")
     parser.add_argument("--feishu-app-secret", default="", help="Feishu app secret override")
     parser.add_argument("--image-mode", default="auto", choices=["auto", "skip"], help="auto=try generate images, fallback on failure; skip=publish without image generation")
+    parser.add_argument("--image-resolution", default="2K", choices=["1K", "2K", "4K"], help="Image generation resolution")
+    parser.add_argument("--image-indices", default="", help="Optional image indices to generate, e.g. 1,3,5")
+    parser.add_argument("--skip-image-generation", action="store_true", help="Do not call generator; use existing images in output dir")
+    parser.add_argument("--reuse-existing-text", action="store_true", help="Reuse existing 03_revised.md in output dir and skip draft/review/revise")
+    parser.add_argument("--reuse-existing-titles", action="store_true", help="Reuse existing 05_titles.json and skip title generation")
+    parser.add_argument("--stop-after", default="all", choices=["all", "text", "images"], help="Stop after text or image stage for staged workflow")
+    parser.add_argument(
+        "--image-model-strategy",
+        default=os.environ.get("NANO_MODEL_STRATEGY", "banana2,banana3"),
+        help="Image model strategy for nano generator, e.g. banana2,banana3",
+    )
     args = parser.parse_args()
 
     out_dir = Path(args.output_dir)
@@ -250,38 +261,71 @@ def main():
     llm_base, llm_key, llm_model = resolve_llm_provider(cfg)
     doc_token = args.doc_token.strip()
 
-    print("[1/7] drafting...", flush=True)
-    # 1) Draft
-    draft_prompt = (
-        "你是微信公众号写作专家。请写一篇 1500-2200 字中文公众号文章，风格专业但亲切，手机端易读。"
-        "要求：开头3行抓人；最多6个二级标题；段落短；必须包含且仅包含 5 个配图占位符，"
-        "格式严格为【配图建议 1：...】到【配图建议 5：...】；结尾要互动提问。"
-        f"主题：{args.topic}"
-    )
-    draft = llm_chat(llm_base, llm_key, llm_model, "输出 Markdown 正文，不要解释。", draft_prompt, temperature=0.55)
-    draft = ensure_five_image_slots(strip_fence(draft))
-    (out_dir / "01_draft.md").write_text(draft, encoding="utf-8")
+    draft_path = out_dir / "01_draft.md"
+    review_path = out_dir / "02_review.json"
+    revised_path = out_dir / "03_revised.md"
 
-    print("[2/7] reviewing...", flush=True)
-    # 2) Review
-    review_prompt = (
-        "请严格评审下面公众号稿，输出 JSON："
-        "{\"score\":0-10,\"major_issues\":[...],\"minor_issues\":[...],\"rewrite_instructions\":[...]}\n\n"
-        + draft
-    )
-    review_raw = llm_chat(llm_base, llm_key, llm_model, "你是公众号总编，只输出 JSON。", review_prompt, temperature=0.2)
-    review = extract_json_object(review_raw)
-    (out_dir / "02_review.json").write_text(json.dumps(review, ensure_ascii=False, indent=2), encoding="utf-8")
+    if args.reuse_existing_text and revised_path.exists():
+        print("[1-3/7] reusing existing text artifacts...", flush=True)
+        revised = revised_path.read_text(encoding="utf-8")
+        if draft_path.exists():
+            draft = draft_path.read_text(encoding="utf-8")
+        else:
+            draft = revised
+        if review_path.exists():
+            try:
+                review = json.loads(review_path.read_text(encoding="utf-8"))
+            except Exception:
+                review = {"score": None, "major_issues": [], "minor_issues": [], "rewrite_instructions": []}
+        else:
+            review = {"score": None, "major_issues": [], "minor_issues": [], "rewrite_instructions": []}
+    else:
+        print("[1/7] drafting...", flush=True)
+        # 1) Draft
+        draft_prompt = (
+            "你是微信公众号写作专家。请写一篇 1500-2200 字中文公众号文章，风格专业但亲切，手机端易读。"
+            "要求：开头3行抓人；最多6个二级标题；段落短；必须包含且仅包含 5 个配图占位符，"
+            "格式严格为【配图建议 1：...】到【配图建议 5：...】；结尾要互动提问。"
+            f"主题：{args.topic}"
+        )
+        draft = llm_chat(llm_base, llm_key, llm_model, "输出 Markdown 正文，不要解释。", draft_prompt, temperature=0.55)
+        draft = ensure_five_image_slots(strip_fence(draft))
+        draft_path.write_text(draft, encoding="utf-8")
 
-    print("[3/7] revising...", flush=True)
-    # 3) Revise
-    revise_prompt = (
-        "根据评审意见重写并输出最终 Markdown。保留 5 个配图占位符格式不变。\n\n"
-        "[原稿]\n" + draft + "\n\n[评审]\n" + json.dumps(review, ensure_ascii=False)
-    )
-    revised = llm_chat(llm_base, llm_key, llm_model, "你是资深编辑，只输出 Markdown 正文。", revise_prompt, temperature=0.45)
-    revised = ensure_five_image_slots(strip_fence(revised))
-    (out_dir / "03_revised.md").write_text(revised, encoding="utf-8")
+        print("[2/7] reviewing...", flush=True)
+        # 2) Review
+        review_prompt = (
+            "请严格评审下面公众号稿，输出 JSON："
+            "{\"score\":0-10,\"major_issues\":[...],\"minor_issues\":[...],\"rewrite_instructions\":[...]}\n\n"
+            + draft
+        )
+        review_raw = llm_chat(llm_base, llm_key, llm_model, "你是公众号总编，只输出 JSON。", review_prompt, temperature=0.2)
+        review = extract_json_object(review_raw)
+        review_path.write_text(json.dumps(review, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        print("[3/7] revising...", flush=True)
+        # 3) Revise
+        revise_prompt = (
+            "根据评审意见重写并输出最终 Markdown。保留 5 个配图占位符格式不变。\n\n"
+            "[原稿]\n" + draft + "\n\n[评审]\n" + json.dumps(review, ensure_ascii=False)
+        )
+        revised = llm_chat(llm_base, llm_key, llm_model, "你是资深编辑，只输出 Markdown 正文。", revise_prompt, temperature=0.45)
+        revised = ensure_five_image_slots(strip_fence(revised))
+        revised_path.write_text(revised, encoding="utf-8")
+    if args.stop_after == "text":
+        report = {
+            "stage": "text",
+            "topic": args.topic,
+            "output_dir": str(out_dir),
+            "artifacts": {
+                "draft": str(draft_path),
+                "review": str(review_path),
+                "revised": str(revised_path),
+            },
+        }
+        (out_dir / "run_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return
 
     print("[4/7] image stage...", flush=True)
     # 4) Generate images (nano) with graceful fallback
@@ -289,12 +333,21 @@ def main():
     if images_enabled:
         image_timeout_s = int(os.environ.get("WX_IMAGE_STAGE_TIMEOUT", "180"))
         try:
-            run_cmd([
-                "python3", str(IMG_SCRIPT),
-                "--article", str(out_dir / "03_revised.md"),
-                "--output-dir", str(img_dir),
-                "--resolution", "2K",
-            ], timeout=image_timeout_s)
+            if not args.skip_image_generation:
+                cmd = [
+                    "python3", str(IMG_SCRIPT),
+                    "--article", str(out_dir / "03_revised.md"),
+                    "--output-dir", str(img_dir),
+                    "--resolution", args.image_resolution,
+                    "--model-strategy", args.image_model_strategy,
+                ]
+                if args.image_indices.strip():
+                    cmd += ["--indices", args.image_indices.strip()]
+                run_cmd(cmd, timeout=image_timeout_s)
+            else:
+                existing = list(img_dir.glob("wx_*.png"))
+                if not existing:
+                    raise RuntimeError("skip-image-generation set, but no existing wx_*.png images found")
         except Exception as e:
             (out_dir / "image_stage_error.log").write_text(str(e), encoding="utf-8")
             images_enabled = False
@@ -303,18 +356,40 @@ def main():
     # 5) Build local preview markdown
     with_images = inject_images(revised, rel_dir="./images") if images_enabled else inject_placeholders_no_images(revised)
     (out_dir / "04_with_images.md").write_text(with_images, encoding="utf-8")
+    if args.stop_after == "images":
+        report = {
+            "stage": "images",
+            "topic": args.topic,
+            "output_dir": str(out_dir),
+            "image_mode": args.image_mode,
+            "images_enabled": images_enabled,
+            "artifacts": {
+                "revised": str(out_dir / "03_revised.md"),
+                "with_images": str(out_dir / "04_with_images.md"),
+                "images_manifest": str(img_dir / "manifest.json"),
+            },
+        }
+        (out_dir / "run_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return
 
     print("[6/7] generating title A/B...", flush=True)
-    # 6) Generate title A/B
-    title_prompt = (
-        "为以下文章生成两个 15-22 字公众号标题。输出 JSON："
-        "{\"title_a\":\"...\",\"title_b\":\"...\"}\n\n" + with_images[:4000]
-    )
-    titles_raw = llm_chat(llm_base, llm_key, llm_model, "你是新媒体主编，只输出 JSON。", title_prompt, temperature=0.7)
-    titles = extract_json_object(titles_raw)
-    title_a = (titles.get("title_a") or "智能调度新范式：人机协作进入实战").strip()
-    title_b = (titles.get("title_b") or "水网 AI 不是替代，而是调度员升级").strip()
-    (out_dir / "05_titles.json").write_text(json.dumps({"title_a": title_a, "title_b": title_b}, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 6) Generate title A/B (or reuse existing to save tokens)
+    titles_path = out_dir / "05_titles.json"
+    if args.reuse_existing_titles and titles_path.exists():
+        old_titles = json.loads(titles_path.read_text(encoding="utf-8"))
+        title_a = (old_titles.get("title_a") or "智能调度新范式：人机协作进入实战").strip()
+        title_b = (old_titles.get("title_b") or "水网 AI 不是替代，而是调度员升级").strip()
+    else:
+        title_prompt = (
+            "为以下文章生成两个 15-22 字公众号标题。输出 JSON："
+            "{\"title_a\":\"...\",\"title_b\":\"...\"}\n\n" + with_images[:4000]
+        )
+        titles_raw = llm_chat(llm_base, llm_key, llm_model, "你是新媒体主编，只输出 JSON。", title_prompt, temperature=0.7)
+        titles = extract_json_object(titles_raw)
+        title_a = (titles.get("title_a") or "智能调度新范式：人机协作进入实战").strip()
+        title_b = (titles.get("title_b") or "水网 AI 不是替代，而是调度员升级").strip()
+        titles_path.write_text(json.dumps({"title_a": title_a, "title_b": title_b}, ensure_ascii=False, indent=2), encoding="utf-8")
 
     if not doc_token:
         doc_token = create_feishu_doc(feishu_app_id, feishu_app_secret, title_a)
@@ -337,9 +412,17 @@ def main():
     # Build image insertion targets from placeholder positions.
     images_cfg = []
     if images_enabled:
+        wanted_indices = None
+        if args.image_indices.strip():
+            wanted_indices = set(int(x.strip()) for x in args.image_indices.split(",") if x.strip().isdigit())
         image_mapping = build_image_heading_mapping(final_md, max_images=5)
         for item in image_mapping:
             idx = item["index"]
+            if wanted_indices is not None and idx not in wanted_indices:
+                continue
+            img_file = img_dir / f"wx_{idx:02d}.png"
+            if args.skip_image_generation and not img_file.exists():
+                continue
             images_cfg.append({
                 "filename": f"wx_{idx:02d}.png",
                 "insert_after_heading": item["insert_after_heading"],

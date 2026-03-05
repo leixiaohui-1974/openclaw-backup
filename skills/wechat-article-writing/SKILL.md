@@ -33,13 +33,13 @@ metadata:
 最简调用（零参数，使用默认主题并自动新建飞书文档）：
 
 ```bash
-python3 {baseDir}/scripts/run.py
+python3 {baseDir}/scripts/job_runner.py
 ```
 
 推荐调用（显式指定）：
 
 ```bash
-python3 {baseDir}/scripts/run.py \
+python3 {baseDir}/scripts/job_runner.py \
   --topic "调度员会被AI取代吗？水网协同真相" \
   --doc-token "F1yfdz69Jo8k2kxIzshcMrFknVd"
 ```
@@ -50,6 +50,12 @@ python3 {baseDir}/scripts/run.py \
 - `--user-openid` 飞书授权用户
 - `--feishu-app-id` / `--feishu-app-secret` 覆盖飞书配置
 - `--image-mode auto|skip`，默认 `auto`；失败自动降级无图，`skip` 为强制无图
+- `--image-model-strategy` 生图模型策略，默认 `banana2,banana3`（先快后优）
+- `--image-resolution` 生图分辨率，`1K/2K/4K`，默认 `2K`
+- `--stop-after text|images|all` 分步执行（先文稿、再配图、最后发布）
+- `--image-indices` 仅生成指定图片序号（如 `1,2`）
+- `--skip-image-generation` 发布时复用已有图片，不重新生图
+- `--reuse-existing-text` 复用 `output-dir` 里的 `03_revised.md`，跳过写稿/评审/修订
 
 ## Output
 - 最终飞书文档链接

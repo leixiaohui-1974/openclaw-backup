@@ -7,10 +7,12 @@
 # ]
 # ///
 """
-Generate images using Google's Nano Banana Pro (Gemini 3 Pro Image) API.
+Generate images using Google's Nano Banana models (Gemini image APIs).
 
 Usage:
-    uv run generate_image.py --prompt "your image description" --filename "output.png" [--resolution 1K|2K|4K] [--api-key KEY]
+    uv run generate_image.py --prompt "your image description" --filename "output.png" \
+      [--resolution 1K|2K|4K] [--api-key KEY] [--model banana3] \
+      [--model-strategy banana2,banana3]
 """
 
 import argparse
@@ -18,6 +20,38 @@ import json
 import os
 import sys
 from pathlib import Path
+
+MODEL_ALIASES = {
+    # Faster fallback-first model preference
+    "banana2": "gemini-2.5-flash-image",
+    "nano2": "gemini-2.5-flash-image",
+    # Higher-quality model currently used in this workspace
+    "banana3": "gemini-3-pro-image-preview",
+    "nano3": "gemini-3-pro-image-preview",
+}
+
+
+def resolve_models(model: str | None, strategy: str | None) -> list[str]:
+    def _resolve_one(v: str) -> str:
+        k = (v or "").strip().lower()
+        if not k:
+            return ""
+        return MODEL_ALIASES.get(k, v.strip())
+
+    models: list[str] = []
+    if model:
+        m = _resolve_one(model)
+        if m:
+            models.append(m)
+    else:
+        raw = strategy or os.environ.get("NANO_MODEL_STRATEGY", "banana2,banana3")
+        for part in raw.split(","):
+            m = _resolve_one(part)
+            if m and m not in models:
+                models.append(m)
+    if not models:
+        models = [MODEL_ALIASES["banana3"]]
+    return models
 
 
 def _read_key_from_dotenv() -> str | None:
@@ -112,6 +146,16 @@ def main():
         "--api-key", "-k",
         help="Gemini API key (overrides GEMINI_API_KEY env var)"
     )
+    parser.add_argument(
+        "--model",
+        default="",
+        help="Single model alias/id (e.g. banana2, banana3, or full model id)"
+    )
+    parser.add_argument(
+        "--model-strategy",
+        default="",
+        help="Comma-separated fallback strategy (e.g. banana2,banana3)"
+    )
 
     args = parser.parse_args()
 
@@ -168,37 +212,23 @@ def main():
         contents = args.prompt
         print(f"Generating image with resolution {output_resolution}...")
 
-    try:
-        response = client.models.generate_content(
-            model="gemini-3-pro-image-preview",
-            contents=contents,
-            config=types.GenerateContentConfig(
-                response_modalities=["TEXT", "IMAGE"],
-                image_config=types.ImageConfig(
-                    image_size=output_resolution
-                )
-            )
-        )
+    models = resolve_models(args.model, args.model_strategy)
+    print(f"Model strategy: {', '.join(models)}")
 
-        # Process response and convert to PNG
+    def _save_image_from_response(resp) -> bool:
         image_saved = False
-        for part in response.parts:
+        for part in getattr(resp, "parts", []) or []:
             if part.text is not None:
                 print(f"Model response: {part.text}")
             elif part.inline_data is not None:
-                # Convert inline data to PIL Image and save as PNG
                 from io import BytesIO
 
-                # inline_data.data is already bytes, not base64
                 image_data = part.inline_data.data
                 if isinstance(image_data, str):
-                    # If it's a string, it might be base64
                     import base64
                     image_data = base64.b64decode(image_data)
 
                 image = PILImage.open(BytesIO(image_data))
-
-                # Ensure RGB mode for PNG (convert RGBA to RGB with white background if needed)
                 if image.mode == 'RGBA':
                     rgb_image = PILImage.new('RGB', image.size, (255, 255, 255))
                     rgb_image.paste(image, mask=image.split()[3])
@@ -208,17 +238,36 @@ def main():
                 else:
                     image.convert('RGB').save(str(output_path), 'PNG')
                 image_saved = True
+        return image_saved
 
-        if image_saved:
-            full_path = output_path.resolve()
-            print(f"\nImage saved: {full_path}")
-        else:
-            print("Error: No image was generated in the response.", file=sys.stderr)
-            sys.exit(1)
+    last_err = None
+    used_model = ""
+    for m in models:
+        try:
+            print(f"Trying model: {m}")
+            response = client.models.generate_content(
+                model=m,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    response_modalities=["TEXT", "IMAGE"],
+                    image_config=types.ImageConfig(image_size=output_resolution),
+                ),
+            )
+            if _save_image_from_response(response):
+                used_model = m
+                full_path = output_path.resolve()
+                print(f"\nImage saved: {full_path}")
+                print(f"Model used: {used_model}")
+                return
+            last_err = RuntimeError("No image was generated in the response.")
+            print(f"Model produced no image: {m}", file=sys.stderr)
+        except Exception as e:
+            last_err = e
+            print(f"Model failed: {m} -> {e}", file=sys.stderr)
+            continue
 
-    except Exception as e:
-        print(f"Error generating image: {e}", file=sys.stderr)
-        sys.exit(1)
+    print(f"Error generating image: all models failed. last_error={last_err}", file=sys.stderr)
+    sys.exit(1)
 
 
 if __name__ == "__main__":

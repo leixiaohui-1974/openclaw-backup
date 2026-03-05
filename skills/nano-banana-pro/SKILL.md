@@ -13,12 +13,12 @@ Run the script using absolute path (do NOT cd to skill directory first):
 
 **Generate new image:**
 ```bash
-uv run {baseDir}/scripts/generate_image.py --prompt "your image description" --filename "output-name.png" [--resolution 1K|2K|4K] [--api-key KEY]
+uv run {baseDir}/scripts/generate_image.py --prompt "your image description" --filename "output-name.png" [--resolution 1K|2K|4K] [--api-key KEY] [--model banana3] [--model-strategy banana2,banana3]
 ```
 
 **Edit existing image:**
 ```bash
-uv run {baseDir}/scripts/generate_image.py --prompt "editing instructions" --filename "output-name.png" --input-image "path/to/input.png" [--resolution 1K|2K|4K] [--api-key KEY]
+uv run {baseDir}/scripts/generate_image.py --prompt "editing instructions" --filename "output-name.png" --input-image "path/to/input.png" [--resolution 1K|2K|4K] [--api-key KEY] [--model banana3] [--model-strategy banana2,banana3]
 ```
 
 **Important:** Always run from the user's current working directory so images are saved where the user is working, not in the skill directory.
