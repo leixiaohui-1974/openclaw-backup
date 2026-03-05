@@ -129,6 +129,15 @@ def inject_images(md_text: str, rel_dir: str = "./images") -> str:
     return re.sub(r"【配图建议\s*(\d+)：([^】]+)】", repl, md_text)
 
 
+def inject_placeholders_no_images(md_text: str) -> str:
+    """Replace image placeholders with readable quote placeholders."""
+    def repl(m):
+        idx = int(m.group(1))
+        desc = m.group(2).strip()
+        return f"> [图片占位 {idx}] {desc}"
+    return re.sub(r"【配图建议\s*(\d+)：([^】]+)】", repl, md_text)
+
+
 def strip_image_placeholders(md_text: str) -> str:
     """Remove placeholder lines like: 【配图建议 N：...】 before Feishu publish."""
     lines = []
@@ -187,10 +196,11 @@ def extract_json_object(text: str) -> Dict[str, Any]:
         raise
 
 
-def run_cmd(cmd: List[str], env: Dict[str, str] = None) -> None:
-    p = subprocess.run(cmd, text=True, capture_output=True, env=env)
+def run_cmd(cmd: List[str], env: Dict[str, str] = None, timeout: int | None = None) -> None:
+    # Stream child output to avoid long silent periods that trigger upstream timeouts.
+    p = subprocess.run(cmd, text=True, env=env, timeout=timeout)
     if p.returncode != 0:
-        raise RuntimeError(f"Command failed: {' '.join(cmd)}\nSTDOUT:\n{p.stdout}\nSTDERR:\n{p.stderr}")
+        raise RuntimeError(f"Command failed: {' '.join(cmd)} (exit={p.returncode})")
 
 
 def main():
@@ -201,6 +211,7 @@ def main():
     parser.add_argument("--user-openid", default="ou_607e1555930b5636c8b88b176b9d3bf2", help="Feishu user openid")
     parser.add_argument("--feishu-app-id", default="", help="Feishu app id override")
     parser.add_argument("--feishu-app-secret", default="", help="Feishu app secret override")
+    parser.add_argument("--image-mode", default="auto", choices=["auto", "skip"], help="auto=try generate images, fallback on failure; skip=publish without image generation")
     args = parser.parse_args()
 
     out_dir = Path(args.output_dir)
@@ -212,6 +223,7 @@ def main():
     feishu_app_id, feishu_app_secret = resolve_feishu_credentials(cfg, args.feishu_app_id, args.feishu_app_secret)
     llm_base, llm_key, llm_model = resolve_llm_provider(cfg)
 
+    print("[1/7] drafting...", flush=True)
     # 1) Draft
     draft_prompt = (
         "你是微信公众号写作专家。请写一篇 1500-2200 字中文公众号文章，风格专业但亲切，手机端易读。"
@@ -223,6 +235,7 @@ def main():
     draft = ensure_five_image_slots(strip_fence(draft))
     (out_dir / "01_draft.md").write_text(draft, encoding="utf-8")
 
+    print("[2/7] reviewing...", flush=True)
     # 2) Review
     review_prompt = (
         "请严格评审下面公众号稿，输出 JSON："
@@ -233,6 +246,7 @@ def main():
     review = extract_json_object(review_raw)
     (out_dir / "02_review.json").write_text(json.dumps(review, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    print("[3/7] revising...", flush=True)
     # 3) Revise
     revise_prompt = (
         "根据评审意见重写并输出最终 Markdown。保留 5 个配图占位符格式不变。\n\n"
@@ -242,18 +256,28 @@ def main():
     revised = ensure_five_image_slots(strip_fence(revised))
     (out_dir / "03_revised.md").write_text(revised, encoding="utf-8")
 
-    # 4) Generate 5 images (nano)
-    run_cmd([
-        "python3", str(IMG_SCRIPT),
-        "--article", str(out_dir / "03_revised.md"),
-        "--output-dir", str(img_dir),
-        "--resolution", "2K",
-    ])
+    print("[4/7] image stage...", flush=True)
+    # 4) Generate images (nano) with graceful fallback
+    images_enabled = args.image_mode != "skip"
+    if images_enabled:
+        image_timeout_s = int(os.environ.get("WX_IMAGE_STAGE_TIMEOUT", "180"))
+        try:
+            run_cmd([
+                "python3", str(IMG_SCRIPT),
+                "--article", str(out_dir / "03_revised.md"),
+                "--output-dir", str(img_dir),
+                "--resolution", "2K",
+            ], timeout=image_timeout_s)
+        except Exception as e:
+            (out_dir / "image_stage_error.log").write_text(str(e), encoding="utf-8")
+            images_enabled = False
 
-    # 5) Insert images into markdown (local preview artifact)
-    with_images = inject_images(revised, rel_dir="./images")
+    print("[5/7] composing markdown...", flush=True)
+    # 5) Build local preview markdown
+    with_images = inject_images(revised, rel_dir="./images") if images_enabled else inject_placeholders_no_images(revised)
     (out_dir / "04_with_images.md").write_text(with_images, encoding="utf-8")
 
+    print("[6/7] generating title A/B...", flush=True)
     # 6) Generate title A/B
     title_prompt = (
         "为以下文章生成两个 15-22 字公众号标题。输出 JSON："
@@ -280,16 +304,18 @@ def main():
     publish_path.write_text(publish_md, encoding="utf-8")
 
     # Build image insertion targets from placeholder positions.
-    image_mapping = build_image_heading_mapping(final_md, max_images=5)
     images_cfg = []
-    for item in image_mapping:
-        idx = item["index"]
-        images_cfg.append({
-            "filename": f"wx_{idx:02d}.png",
-            "insert_after_heading": item["insert_after_heading"],
-            "description": item["description"] or f"图{idx}",
-        })
+    if images_enabled:
+        image_mapping = build_image_heading_mapping(final_md, max_images=5)
+        for item in image_mapping:
+            idx = item["index"]
+            images_cfg.append({
+                "filename": f"wx_{idx:02d}.png",
+                "insert_after_heading": item["insert_after_heading"],
+                "description": item["description"] or f"图{idx}",
+            })
 
+    print("[7/7] publishing to feishu...", flush=True)
     # 7) Publish to Feishu doc (overwrite body)
     pub_cfg = {
         "feishu": {"app_id": feishu_app_id, "app_secret": feishu_app_secret},
@@ -333,6 +359,8 @@ def main():
             "final_publish": str(publish_path),
             "images_manifest": str(img_dir / "manifest.json"),
         },
+        "image_mode": args.image_mode,
+        "images_enabled": images_enabled,
     }
     (out_dir / "run_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 

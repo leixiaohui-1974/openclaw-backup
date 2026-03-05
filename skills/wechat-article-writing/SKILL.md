@@ -23,7 +23,7 @@ metadata:
 - 写稿
 - 三角色评审
 - 修订
-- 生成 5 张 nano-banana 图片
+- 配图（默认跳过，避免超时；可切换为自动生成 5 张 nano-banana 图片）
 - 图文排版
 - 生成标题 A/B
 - 覆盖写入飞书文档
@@ -48,6 +48,7 @@ python3 {baseDir}/scripts/run.py \
 - `--output-dir` 产物目录
 - `--user-openid` 飞书授权用户
 - `--feishu-app-id` / `--feishu-app-secret` 覆盖飞书配置
+- `--image-mode skip|auto`，默认 `skip`（稳定）；`auto` 为尝试生成图片，失败自动降级无图
 
 ## Output
 - 最终飞书文档链接

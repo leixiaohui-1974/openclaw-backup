@@ -17,6 +17,7 @@ def main():
     parser.add_argument("--user-openid", default="ou_607e1555930b5636c8b88b176b9d3bf2")
     parser.add_argument("--feishu-app-id", default="")
     parser.add_argument("--feishu-app-secret", default="")
+    parser.add_argument("--image-mode", default="skip", choices=["auto", "skip"])
     args = parser.parse_args()
 
     target = Path.home() / ".openclaw/workspace/skills/wx-nano-image-pack/scripts/wx_full_workflow.py"
@@ -35,6 +36,7 @@ def main():
         "--doc-token", args.doc_token,
         "--output-dir", output_dir,
         "--user-openid", args.user_openid,
+        "--image-mode", args.image_mode,
     ]
     if args.feishu_app_id:
         cmd += ["--feishu-app-id", args.feishu_app_id]
