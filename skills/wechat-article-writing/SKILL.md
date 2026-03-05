@@ -30,6 +30,14 @@ metadata:
 
 ## Usage
 
+最简调用（零参数，使用默认主题+默认文档）：
+
+```bash
+python3 {baseDir}/scripts/run.py
+```
+
+推荐调用（显式指定）：
+
 ```bash
 python3 {baseDir}/scripts/run.py \
   --topic "调度员会被AI取代吗？水网协同真相" \
