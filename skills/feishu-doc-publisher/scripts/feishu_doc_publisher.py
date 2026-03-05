@@ -175,6 +175,44 @@ def get_children(token, doc_token):
     return all_blocks
 
 
+def batch_delete_children(token, doc_token, start_index, end_index):
+    """Delete top-level children in [start_index, end_index)."""
+    r = requests.delete(
+        f"{FEISHU_BASE}/docx/v1/documents/{doc_token}/blocks/{doc_token}/children/batch_delete",
+        headers=_headers(token),
+        json={"start_index": start_index, "end_index": end_index})
+    d = r.json()
+    if d.get("code") != 0:
+        raise RuntimeError(f"Batch delete failed: {d}")
+
+
+def clear_document_body(token, doc_token, keep_title_block=True):
+    """Clear existing top-level blocks before rewrite.
+
+    Returns number of deleted blocks.
+    """
+    deleted = 0
+    while True:
+        items = get_children(token, doc_token)
+        if not items:
+            break
+
+        start = 0
+        if keep_title_block and items and items[0].get("block_type") == BT_H1:
+            start = 1
+
+        if len(items) <= start:
+            break
+
+        # Delete in chunks to avoid oversized delete ranges.
+        chunk_end = min(start + 50, len(items))
+        batch_delete_children(token, doc_token, start, chunk_end)
+        deleted += (chunk_end - start)
+        time.sleep(0.2)
+
+    return deleted
+
+
 def upload_image(token, block_id, image_path):
     """Upload image to Feishu drive, returns file_token."""
     with open(image_path, "rb") as f:
@@ -222,6 +260,19 @@ def get_raw_content(token, doc_token):
     if d.get("code") != 0:
         return ""
     return d["data"].get("content", "")
+
+
+def estimate_text_len(markdown_text):
+    """Rough plain-text length estimate from markdown text."""
+    text = markdown_text
+    text = re.sub(r'```[\s\S]*?```', '', text)
+    text = re.sub(r'!\[[^\]]*\]\([^)]+\)', '', text)
+    text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
+    text = re.sub(r'^\s{0,3}#{1,6}\s*', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^\s*[-*]\s+', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^\s*\d+\.\s+', '', text, flags=re.MULTILINE)
+    text = re.sub(r'[*_`>#|~-]', '', text)
+    return len(re.sub(r'\s+', '', text))
 
 
 # ══════════════════════════════════════════════════════════════
@@ -278,8 +329,9 @@ def markdown_to_blocks(md_text):
             i += 1
             continue
 
-        # Skip H1 title (already the doc title)
+        # H1
         if re.match(r'^#\s+[^#]', stripped):
+            blocks.append(_make_block(BT_H1, "heading1", re.sub(r'^#\s+', '', stripped)))
             i += 1
             continue
 
@@ -457,6 +509,8 @@ def run(config):
     images = config.get("images", [])
     user_openid = config.get("user_openid", "")
     skip_content = config.get("skip_content", False)
+    overwrite_content = config.get("overwrite_content", True)
+    keep_title_block = config.get("keep_title_block", True)
     strip_trailing_info = config.get("strip_trailing_info", True)
 
     print("=" * 60)
@@ -468,18 +522,18 @@ def run(config):
     token = feishu_token(feishu["app_id"], feishu["app_secret"])
     print("  ✅ Token OK")
 
-    # 2. Check doc content
+    # 2. Check doc content/structure
     print("\n[2/5] Checking document...")
     raw = get_raw_content(token, doc_token)
     raw_len = len(raw.strip())
-    print(f"  Document raw content: {raw_len} chars")
+    blocks_before = get_children(token, doc_token)
+    print(f"  Document raw content: {raw_len} chars, blocks: {len(blocks_before)}")
 
-    # 3. Write content (if empty or forced)
+    # 3. Rewrite content
     content_written = 0
+    source_text_len = 0
     if skip_content:
         print("  ⏭️  skip_content=true, skipping content write")
-    elif raw_len > 50:
-        print(f"  ⏭️  Document already has content ({raw_len} chars), skipping write")
     else:
         print("\n[3/5] Writing article content...")
         with open(article_path, "r") as f:
@@ -487,6 +541,11 @@ def run(config):
 
         if strip_trailing_info:
             md_text = re.sub(r'\n\*本文基于作者在.*$', '', md_text, flags=re.DOTALL)
+        source_text_len = estimate_text_len(md_text)
+
+        if overwrite_content:
+            deleted = clear_document_body(token, doc_token, keep_title_block=keep_title_block)
+            print(f"  Cleared existing body blocks: {deleted}")
 
         blocks = markdown_to_blocks(md_text)
         print(f"  Parsed {len(blocks)} blocks")
@@ -559,9 +618,18 @@ def run(config):
 
     # Summary
     print(f"\n{'=' * 60}")
-    print(f"✅ Done!")
+    print("✅ Done!")
     raw2 = get_raw_content(token, doc_token)
-    print(f"  Content: {len(raw2)} chars")
+    written_len = len(raw2.strip())
+    print(f"  Content: {written_len} chars")
+    if not skip_content and source_text_len > 0:
+        ratio = written_len / max(source_text_len, 1)
+        print(f"  Length check: source≈{source_text_len}, doc={written_len}, ratio={ratio:.2f}")
+        if ratio < 0.55:
+            raise RuntimeError(
+                f"Content length check failed (ratio={ratio:.2f}). "
+                "Document may be partially written."
+            )
     print(f"  Doc URL: https://leixiaohui1974.feishu.cn/docx/{doc_token}")
     print(f"{'=' * 60}")
     return True
@@ -578,6 +646,8 @@ def sample_config():
         "images_dir": "/home/admin/workspace/workspace/articles/images",
         "user_openid": "ou_607e1555930b5636c8b88b176b9d3bf2",
         "skip_content": False,
+        "overwrite_content": True,
+        "keep_title_block": True,
         "strip_trailing_info": True,
         "images": [
             {

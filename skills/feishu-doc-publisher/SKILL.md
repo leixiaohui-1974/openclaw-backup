@@ -71,10 +71,10 @@ Options:
 
 ```
 1. 认证 → 获取飞书 tenant_access_token
-2. 检查文档 → 如果已有内容（>50字）自动跳过写入
-3. 写正文 → Markdown 解析为飞书 block，批量创建
+2. 读取文档结构 → 获取 top-level blocks
+3. 覆盖正文 → 默认先清空正文 blocks（可保留标题）再批量写入
 4. 插图 → 根据 insert_after_heading 定位章节末尾，插入图片
-5. 授权 → 给 user_openid 添加 full_access
+5. 校验+授权 → 校验写入长度，再给 user_openid 添加 full_access
 ```
 
 ## 支持的 Markdown 元素
@@ -106,6 +106,8 @@ Options:
 | `images_dir` | No | 图片目录（默认当前目录） |
 | `user_openid` | No | 授权用户 OpenID |
 | `skip_content` | No | 跳过写正文（默认 false） |
+| `overwrite_content` | No | 是否覆盖正文（默认 true） |
+| `keep_title_block` | No | 覆盖时保留标题块（默认 true） |
 | `strip_trailing_info` | No | 去除末尾个人信息（默认 true） |
 | `images[].filename` | Yes | 图片文件名 |
 | `images[].insert_after_heading` | Yes | 在此标题的章节末尾插图 |
@@ -113,7 +115,8 @@ Options:
 
 ## Notes
 
-- 文档已有内容（>50字）时自动跳过写入，避免重复
+- 默认强制覆盖正文（先清空再写），避免“只保留标题/旧正文未更新”
 - 图片按从后往前的顺序插入，避免索引偏移
 - 每次插图前重新读取文档结构，确保索引准确
+- 写入后会做长度校验，防止正文写入不完整
 - 表格因飞书 API 复杂性，转为纯文本行（用 │ 分隔）
