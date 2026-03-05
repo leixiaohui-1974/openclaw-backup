@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 DEFAULT_TOPIC = "调度员会被AI取代吗？水网协同真相"
-DEFAULT_DOC_TOKEN = "F1yfdz69Jo8k2kxIzshcMrFknVd"
+DEFAULT_DOC_TOKEN = ""
 
 
 def main():
@@ -17,7 +17,7 @@ def main():
     parser.add_argument("--user-openid", default="ou_607e1555930b5636c8b88b176b9d3bf2")
     parser.add_argument("--feishu-app-id", default="")
     parser.add_argument("--feishu-app-secret", default="")
-    parser.add_argument("--image-mode", default="skip", choices=["auto", "skip"])
+    parser.add_argument("--image-mode", default="auto", choices=["auto", "skip"])
     args = parser.parse_args()
 
     target = Path.home() / ".openclaw/workspace/skills/wx-nano-image-pack/scripts/wx_full_workflow.py"

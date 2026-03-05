@@ -39,6 +39,32 @@ def resolve_feishu_credentials(cfg: Dict[str, Any], app_id: str, app_secret: str
     return aid, sec
 
 
+def feishu_token(app_id: str, app_secret: str) -> str:
+    r = requests.post(
+        "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+        json={"app_id": app_id, "app_secret": app_secret},
+        timeout=30,
+    )
+    d = r.json()
+    if d.get("code") != 0:
+        raise RuntimeError(f"Feishu auth failed: {d}")
+    return d["tenant_access_token"]
+
+
+def create_feishu_doc(app_id: str, app_secret: str, title: str) -> str:
+    token = feishu_token(app_id, app_secret)
+    r = requests.post(
+        "https://open.feishu.cn/open-apis/docx/v1/documents",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        json={"title": title[:120] if title else "公众号文章"},
+        timeout=30,
+    )
+    d = r.json()
+    if d.get("code") != 0:
+        raise RuntimeError(f"Create Feishu doc failed: {d}")
+    return d["data"]["document"]["document_id"]
+
+
 def resolve_llm_provider(cfg: Dict[str, Any]) -> Tuple[str, str, str]:
     providers = cfg.get("models", {}).get("providers", {})
     # Prefer providers with non-empty keys; default to dashscope first for local stability.
@@ -206,7 +232,7 @@ def run_cmd(cmd: List[str], env: Dict[str, str] = None, timeout: int | None = No
 def main():
     parser = argparse.ArgumentParser(description="WX full workflow: draft->review->revise->images->AB title->Feishu")
     parser.add_argument("--topic", required=True, help="Article topic")
-    parser.add_argument("--doc-token", required=True, help="Feishu doc token")
+    parser.add_argument("--doc-token", default="", help="Feishu doc token; empty means auto-create a new doc")
     parser.add_argument("--output-dir", default="/home/admin/workspace/articles/wx_workflow_latest", help="Output directory")
     parser.add_argument("--user-openid", default="ou_607e1555930b5636c8b88b176b9d3bf2", help="Feishu user openid")
     parser.add_argument("--feishu-app-id", default="", help="Feishu app id override")
@@ -222,6 +248,7 @@ def main():
     cfg = load_openclaw_config()
     feishu_app_id, feishu_app_secret = resolve_feishu_credentials(cfg, args.feishu_app_id, args.feishu_app_secret)
     llm_base, llm_key, llm_model = resolve_llm_provider(cfg)
+    doc_token = args.doc_token.strip()
 
     print("[1/7] drafting...", flush=True)
     # 1) Draft
@@ -289,6 +316,10 @@ def main():
     title_b = (titles.get("title_b") or "水网 AI 不是替代，而是调度员升级").strip()
     (out_dir / "05_titles.json").write_text(json.dumps({"title_a": title_a, "title_b": title_b}, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    if not doc_token:
+        doc_token = create_feishu_doc(feishu_app_id, feishu_app_secret, title_a)
+        print(f"[0/7] created doc: https://leixiaohui1974.feishu.cn/docx/{doc_token}", flush=True)
+
     # Apply title A as final H1 (publish content keeps placeholder anchors)
     final_md = revised
     if re.search(r"^#\s+", final_md, flags=re.MULTILINE):
@@ -319,7 +350,7 @@ def main():
     # 7) Publish to Feishu doc (overwrite body)
     pub_cfg = {
         "feishu": {"app_id": feishu_app_id, "app_secret": feishu_app_secret},
-        "doc_token": args.doc_token,
+        "doc_token": doc_token,
         "article_path": str(publish_path),
         "images_dir": str(img_dir),
         "user_openid": args.user_openid,
@@ -344,8 +375,8 @@ def main():
 
     report = {
         "topic": args.topic,
-        "doc_token": args.doc_token,
-        "doc_url": f"https://leixiaohui1974.feishu.cn/docx/{args.doc_token}",
+        "doc_token": doc_token,
+        "doc_url": f"https://leixiaohui1974.feishu.cn/docx/{doc_token}",
         "title_a": title_a,
         "title_b": title_b,
         "output_dir": str(out_dir),

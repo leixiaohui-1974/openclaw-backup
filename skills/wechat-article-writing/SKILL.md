@@ -23,14 +23,14 @@ metadata:
 - 写稿
 - 三角色评审
 - 修订
-- 配图（默认跳过，避免超时；可切换为自动生成 5 张 nano-banana 图片）
+- 配图（默认自动生成 5 张 nano-banana 图片；失败自动降级无图）
 - 图文排版
 - 生成标题 A/B
 - 覆盖写入飞书文档
 
 ## Usage
 
-最简调用（零参数，使用默认主题+默认文档）：
+最简调用（零参数，使用默认主题并自动新建飞书文档）：
 
 ```bash
 python3 {baseDir}/scripts/run.py
@@ -46,9 +46,10 @@ python3 {baseDir}/scripts/run.py \
 
 可选参数：
 - `--output-dir` 产物目录
+- `--doc-token` 指定已有飞书文档（不传则自动新建）
 - `--user-openid` 飞书授权用户
 - `--feishu-app-id` / `--feishu-app-secret` 覆盖飞书配置
-- `--image-mode skip|auto`，默认 `skip`（稳定）；`auto` 为尝试生成图片，失败自动降级无图
+- `--image-mode auto|skip`，默认 `auto`；失败自动降级无图，`skip` 为强制无图
 
 ## Output
 - 最终飞书文档链接
